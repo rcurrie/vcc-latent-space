@@ -1,0 +1,17 @@
+[project]
+name = "latent-space"
+version = "0.1.0"
+description = "Explorations in continious latent space learning"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "ipython>=9.11.0",
+    "jupyter>=1.1.1",
+    "matplotlib>=3.10.8",
+    "numpy>=2.4.3",
+    "pandas>=3.0.1",
+    "torch>=2.10.0",
+    "torchvision>=0.25.0",
+    "scikit-learn>=1.6.0",
+    "umap-learn>=0.5.7",
+]
