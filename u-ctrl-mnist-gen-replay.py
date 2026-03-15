@@ -1,3 +1,29 @@
+"""
+================================================================================
+PROJECT: Unsupervised Manifold Discovery (u-CTRL)
+MODULE: Generative Replay & Latent Trajectory Morphing
+================================================================================
+
+OVERVIEW:
+This module extends the unsupervised manifold discovery (u-CTRL) framework by
+introducing Generative Replay, replacing the exact historical memory buffer from
+`u-ctrl-mnist-replay.py` with a purely latent-space buffer.
+
+KEY DIFFERENCES FROM `u-ctrl-mnist-replay.py`:
+1. Generative vs. Exact Replay: Instead of storing explicit historical images
+   (pixels) in a Reservoir buffer, this model only stores latent representations
+   (z) and uses a Decoder to "dream" the historical sensory experiences for
+   consolidation.
+2. Architecture Upgrade: Transitioned from an Encoder-only architecture to a full
+   Autoencoder-style `DiscoveryEngine` (Encoder + Decoder).
+3. Data-Driven Latent Buffer: The buffer now maintains active "Room Centroids"
+   using competitive learning directly in the latent space.
+4. Manifold Morphing: Introduces a biological trajectory test to visualize
+   smooth generative transitions between different learned cell states
+   (latent classes) via linear interpolation.
+================================================================================
+"""
+
 # %% [1] Imports & Setup
 import torch
 import torch.nn as nn
