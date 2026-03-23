@@ -11,9 +11,9 @@ from matplotlib.lines import Line2D
 # [1] Configuration
 CONFIG = {
     "d": 128,  # Latent dimensionality
-    "eps": 0.5,  # Coding rate precision
-    "lambda_straight": 5.0,  # JEPA straightening strength
-    "lambda_ctrl": 1.0,  # u-CTRL room separation strength
+    "eps": 0.2,  # Coding rate precision
+    "lambda_straight": 10.0,  # Zero tolarance for curvy paths
+    "lambda_ctrl": 2.5,  # u-CTRL room separation strength
     "batch_size": 128,
     "lr": 1e-3,
     "steps": 1201,  # Extra step for final visual
@@ -229,3 +229,90 @@ if __name__ == "__main__":
             emit_vcc_snapshot(step, model, triplets, labels)
 
     print("Experiment Complete. Trajectories Straightened.")
+
+
+# %% [1] Imports & Setup
+def run_vcc_nudge_test(model, triplets, labels):
+    print("\n🚀 Starting Zero-Shot Nudge Test...")
+    model.eval()
+    with torch.no_grad():
+        # 1. Calculate the 'Canonical Nudge' for Fate 4
+        # We find the vector that represents the total shift from 1 to 4
+        path_4_mask = labels == 0
+        z_starts = model.get_z(triplets[path_4_mask, 0])
+        z_ends = model.get_z(triplets[path_4_mask, -1])
+
+        # The average 'Treatment Effect' vector
+        nudge_4 = (z_ends - z_starts).mean(dim=0, keepdim=True)
+
+        # 2. Pick a "Holdout" Progenitor (A '1' that will be 'perturbed')
+        # We'll take the first one from the dataset
+        z_progenitor = model.get_z(triplets[0, 0].unsqueeze(0))
+        actual_target_4 = model.get_z(triplets[0, -1].unsqueeze(0))
+
+        # 3. Apply the Nudge: Z_pred = Z_init + Delta_Z
+        # This is the "Zero-Shot" prediction of the drug/perturbation effect
+        z_predicted = F.normalize(z_progenitor + nudge_4, dim=1)
+
+        # 4. Benchmarking Accuracy
+        dist_to_real = torch.norm(z_predicted - actual_target_4).item()
+
+        # Calculate distance to a random '7' to ensure specificity (Incoherence check)
+        path_7_ends = model.get_z(triplets[labels == 1, -1])
+        dist_to_wrong_fate = torch.norm(z_predicted - path_7_ends.mean(0)).item()
+
+    print(f"--- Results ---")
+    print(f"Predicted Point -> Actual Fate 4 Distance: {dist_to_real:.4f}")
+    print(f"Predicted Point -> Wrong Fate 7 Distance:  {dist_to_wrong_fate:.4f}")
+
+    # Success is defined by the "Perturbation Discrimination Score"
+    ratio = dist_to_wrong_fate / (dist_to_real + 1e-6)
+    print(f"Discrimination Ratio: {ratio:.2f}x (Higher is better)")
+
+    if dist_to_real < dist_to_wrong_fate:
+        print("✅ SUCCESS: The linear nudge is sample-specific and fate-accurate.")
+    else:
+        print("❌ FAILURE: The latent space is still too tangled.")
+
+
+# Run the final test
+run_vcc_nudge_test(model, triplets, labels)
+
+
+# %%
+def discover_hd_fate_drivers(model, progenitor_img, num_samples=50, noise_level=0.1):
+    """
+    SmoothGrad implementation to clean up the saliency map noise.
+    Reveals the 'Master Regulators' of the fate transition.
+    """
+    model.eval()
+    avg_grad = torch.zeros_like(progenitor_img)
+
+    for _ in range(num_samples):
+        # Add a tiny bit of noise to 'shake' the latent space
+        noise = torch.randn_like(progenitor_img) * noise_level
+        input_img = (progenitor_img + noise).clone().detach().requires_grad_(True)
+
+        z = model.get_z(input_img)
+        z_pred = model.predict_next(z)
+
+        # Maximize the 'Fate 4' direction
+        loss = z_pred[0, 0]
+        loss.backward()
+
+        avg_grad += input_img.grad.abs()
+
+    # Average and normalize
+    hd_saliency = (avg_grad / num_samples).view(28, 28).cpu().numpy()
+
+    plt.figure(figsize=(6, 6))
+    plt.imshow(hd_saliency, cmap="inferno")  # Inferno/Magma often shows contrast better
+    plt.title("HD Driver Discovery (SmoothGrad)")
+    plt.colorbar(label="Consistency Score")
+    plt.show()
+
+
+# Run the HD version
+sample_1 = triplets[0, 0].unsqueeze(0)
+discover_hd_fate_drivers(model, sample_1)
+# %%

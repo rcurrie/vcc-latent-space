@@ -14,3 +14,6 @@ _Milt, we're gonna need to go ahead and move you downstairs into storage B. We h
 
 ![](results/u-ctl-mnist-gen-replay.png)
 ![](results/u-ctl-mnist-gen-replay-trajectory.png)
+
+# Geo JEPA
+
