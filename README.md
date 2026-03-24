@@ -17,6 +17,12 @@ _Milt, we're gonna need to go ahead and move you downstairs into storage B. We h
 
 # Geo JEPA
 
-[geo_jepa_simple.py](geo_jepa_simple.py) validates geometry-aware JEPA on a proxy scRNA-seq dataset built from MNIST. MLP encoder + MCR² loss learns orthogonal subspaces per cell-type "room" on a 128D hypersphere; JEPA predictor learns perturbation trajectories between rooms.
+[geo_jepa_simple.py](geo_jepa_simple.py) validates geometry-aware JEPA on a proxy scRNA-seq dataset built from MNIST. Two-phase training:
+
+**Phase A** — MLP encoder + MCR² loss learns orthogonal subspaces per cell-type "room" on a 128D hypersphere. DR ~1.9-2.3x with clean room separation:
+
+![](results/geo_jepa_simple_homeostatic.png)
+
+**Phase B** — TrajectoryPredictor learns perturbation trajectories between rooms using residual displacement on the unit sphere. Predictions land in the correct room neighborhood (DR ~1.25-1.37x) but lack the precision of actual perturbation embeddings (DR ~1.9-2.3x). Next steps: encoder fine-tuning or richer perturbation representations.
 
 See [GEO_JEPA_PLAN.md](GEO_JEPA_PLAN.md) for the full roadmap.
