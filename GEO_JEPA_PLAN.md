@@ -1,36 +1,57 @@
 # Geo-JEPA Roadmap
 
-## Current status — proxy dataset validation (geo_jepa_simple.py)
+## Prior work — MCR²-based JEPA (geo_jepa_simple.py)
 
 - MLP encoder (2000D → 512 → 512 → 128, L2-normalized) + MCR² (d×d eigvalsh) + JEPA predictor
 - 7-room proxy dataset from MNIST [0,1,3,4,7,8,9] with MNAR dropout simulating scRNA-seq
 - AdamW, batch 512, 40 epochs (~30s on MPS)
-- DR 1.78–2.29x, off-diagonal cosine ~0.02, clean UMAP separation
+- **Phase A** — DR 1.78–2.29x, off-diagonal cosine ~0.02, clean UMAP separation
 - Hard labels (known digit identity) used for Π in MCR² and for diagnostic coloring
+- **Phase B** — TrajectoryPredictor with residual displacement, frozen encoder
+  - Predicted DR ~1.25-1.37x vs actual DR ~1.9-2.3x
+  - Predictions land in correct room neighborhood but lack precision
+  - **Bottleneck**: frozen encoder compresses within-room variance; MLP predictor uses simple concatenation for perturbation conditioning
 
-## Completed — trajectory prediction (Phase B)
+## Current — LeWM world model with SIGReg (lewm_scrna.py)
 
-- TrajectoryPredictor with residual displacement: z_dest = normalize(z_source + delta)
-- Perturbation embedding (32D) per type, scaled by dose
-- Cosine similarity loss, 40 epochs, frozen encoder
-- **Result**: Predicted DR ~1.25-1.37x vs actual DR ~1.9-2.3x
-- Predictions land in the correct room neighborhood but lack precision
-- Tried: MSE loss, cosine loss, absolute prediction, learned room embeddings, residual displacement — all converge to similar predicted DR
-- **Bottleneck hypothesis**: frozen encoder compresses within-room variance, so z_source carries no cell-specific signal; predictor can only learn room-level mappings
+Inspired by [LeWorldModel](https://le-wm.github.io/) (Maes, Le Lidec, LeCun et al. 2026). Reframes the problem: perturbations are "actions" in a latent world model.
 
-## Next steps — proxy dataset
+### Key design changes from geo_jepa_simple.py
 
-1. **Improve trajectory prediction** — unfreeze encoder with low LR during Phase B, or add richer perturbation representations (dose as separate input, larger pert embedding)
-2. **OOD detection** — digit 7 reserved as unseen fate target; measure whether predicted trajectories toward 7 have detectably higher uncertainty or coding-rate anomaly
+| Aspect | MCR² approach | LeWM approach |
+|--------|--------------|---------------|
+| Regularizer | MCR² with hard labels | SIGReg (unsupervised) |
+| Encoder output | L2-normalized (unit sphere) | BatchNorm projector (R^d) |
+| Target encoder | EMA + stop-gradient | Stop-gradient only (no EMA) |
+| Prediction loss | MSE on sphere / cosine sim | MSE in R^d |
+| Perturbation conditioning | Concatenation + MLP | AdaLN (planned) |
+| Encoder during pert training | Frozen | Joint training (planned) |
 
-## Future — toward unsupervised partitioning
+### Completed — homeostatic structure (Phase 1)
 
-3. **Soft / learned Π** — replace hard labels with a clustering head that outputs soft assignments; MCR² natively supports soft partition matrices; the loss itself drives room discovery
-4. **R-only baseline** — maximize total coding rate R(Z) without explicit Π; rely on JEPA structure to implicitly organize rooms; compare with soft-Π version
-5. **Validate on known biology** — run on a well-characterized scRNA-seq dataset (e.g., Tabula Muris or PBMC 10x) where cell-type labels exist for ground-truth comparison
+- MLP encoder + BatchNorm projector (no L2 norm) + JEPA gene-set masking
+- SIGReg (Epps-Pulley test on 64 random 1D projections, Cramér-Wold theorem)
+- **Result**: DR=2.37x, off-diag cosine ~0.47, 44s training, no labels used
+- Separation weaker than MCR² (off-diag 0.47 vs 0.02) but achieved fully unsupervised
+- SIGReg converges to ~-0.304 (near-Gaussian marginals confirmed)
+- Representation sufficient for fate discrimination — proceed to perturbation prediction
 
-## Future — architecture upgrades
+### Next — perturbation prediction (Phase 2)
 
-6. **Gene-set attention encoder** — replace MLP with GeneInteractionPrior (attention over pathway-grouped genes) from geo_jepa_mnist.py once MLP baseline is solid
-7. **ReduNet layers** — revisit iterative compression layers; need stable d×d formulation (not Cholesky) to run on MPS
-8. **Phase A/B curriculum** — homeostatic scaffold (Phase A) → perturbation learning (Phase B) with EMA anchor; originally implemented in geo_jepa_mnist.py but collapsed; retry on simpler backbone
+1. **AdaLN-conditioned predictor** — Adaptive Layer Normalization with zero-initialization at each predictor layer, conditioning on perturbation embedding. Replaces simple concatenation. Zero-init means predictor starts as identity ("predict no change"), learns deviations.
+2. **Joint encoder+predictor training** — unlike frozen-encoder Phase B, train both together. SIGReg prevents collapse without freezing.
+3. **Loss**: L_pred(trajectory) + λ_sigreg * SIGReg(Z). Optional MCR² overlay later.
+4. **Evaluate**: compare trajectory DR against Phase B baseline (1.25-1.37x). Hypothesis: joint training + AdaLN will substantially improve this.
+
+### Future extensions
+
+5. **MCR² overlay** — add MCR² with discovered or known labels for structured subspace geometry on top of SIGReg
+6. **Multi-step rollouts** — MPC-style planning for perturbation sequence optimization (CEM from LeWM)
+7. **OOD detection** — digit 7 reserved as unseen fate target; measure coding-rate anomaly on predicted trajectories
+8. **Validate on real biology** — Tabula Muris or PBMC 10x where cell-type labels exist for ground-truth comparison
+
+## Architecture ideas (future)
+
+- **Gene-set attention encoder** — replace MLP with GeneInteractionPrior (attention over pathway-grouped genes) from geo_jepa_mnist.py
+- **ReduNet layers** — iterative compression; need stable d×d formulation (not Cholesky) for MPS
+- **Soft Π** — replace hard labels with clustering head for MCR²; loss drives room discovery
