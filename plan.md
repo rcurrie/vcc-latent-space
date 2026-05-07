@@ -18,7 +18,7 @@ Move all MNIST/proxy code to a `legacy/` directory (preserve it, don't delete �
 | `build_proxy_dataset.py` | MNIST proxy generator |
 | `geo_jepa_simple.py` | MCR² Phase A/B prototype |
 | `geo_jepa_mnist.py` | Earlier prototype |
-| `lewm_scrna.py` | Will be reborn as `lewm_vcc.py` with same architecture |
+| `lewm_scrna.py` | Will be reborn as the `src/lewm/` package with the same architecture |
 | `u-ctrl-mnist-*.py` | u-CTRL prototypes, unrelated |
 | `GEO_JEPA_PLAN.md` | Stale roadmap; replaced by this plan |
 | `GEO_JEPA_SESSION_BRIEFING.md` | Pre-pivot context |
@@ -58,15 +58,19 @@ Held-out test set: 100 perturbations whose identities we don't see during traini
 **Milestone 0.2**: pyproject.toml updated, `uv sync` succeeds, torch 2.11 + scanpy + anndata install cleanly
 **Milestone 0.3**: Smoke test — load training h5ad in backed mode, print shape, list 5 perturbations, embed 100 cells through a randomly-initialized MLP. Validates the data path end-to-end.
 
-### Phase 1 — Data pipeline (target: feed cells into PyTorch reliably)
+### Phase 1 — Data pipeline (target: feed cells into PyTorch reliably) — DONE
 
-**Milestone 1.1**: Convert h5ad → zarr v3 once (one-time, ~30min). Result: 3 zarr stores in `data/vcc/zarr/{train,val,test}/`. Reason: HDF5 isn't process-safe, breaks `num_workers>0`. Zarr supports concurrent readers.
+**Strategy decision**: Skip zarr conversion. The VCC training file's CSR is ~15.5GB in memory (1.93B nnz), which fits comfortably in 32GB. Loading takes 6.5s. Random batch access from in-memory scipy CSR is ~13ms/batch. `num_workers=0` is fine at this scale — model compute dominates, not data loading. Simpler, no upfront 30min wait, no 30GB extra disk.
 
-**Milestone 1.2**: PyTorch `Dataset` that yields `(cell_expression, perturbation_id, batch_id, is_control)` tuples from zarr. Sparse → dense conversion happens per-batch on the worker. Test: iterate one full epoch, time it, target <5min/epoch on M4.
+**Milestone 1.1** (done): Data loading. `lewm.data.load_split(name)` reads h5ad fully into memory as scipy CSR + per-cell metadata (target_gene, batch, perturbation IDs against a vocab).
 
-**Milestone 1.3**: Stratified perturbation sampler — within each batch, ensure mix of (control cells, multiple perturbations). Avoids degenerate batches where SIGReg can't compute meaningful Gaussianity.
+**Milestone 1.2** (done): `VCCDataset` — wraps a `VCCSplit` plus an `indices` array, so the same split can be subset (controls only for Phase 1, train minus held-out perts, etc). Per-cell normalization (log1p of CP10k) on the fly.
 
-**Milestone 1.4**: Train/val split tooling — VCC gives us the splits, but we also want a held-out perturbation set within training for our own development metrics. Reserve 10 perturbations from training for "internal val".
+**Milestone 1.3** (done): `StratifiedPerturbationSampler` — each batch contains 25% control cells + 8 perturbations × 48 cells each = 512 total. Guarantees SIGReg sees a non-degenerate distribution.
+
+**Milestone 1.4** (done): `make_internal_val_split` — holds out 10 randomly-chosen non-control perturbations from training as our internal eval set. ~9.5k cells held out from 221k.
+
+**Smoke test results** (on M4, MPS): 6.5s load, 120ms/batch (data + 9.4M-param MLP forward). Full epoch projected at ~52s. 9 unique perts per batch as designed; batch normalization stats look reasonable (x.mean≈0.30, x.std≈0.45).
 
 ### Phase 2 — Baseline LeWM on VCC (target: first end-to-end submission)
 
@@ -78,7 +82,7 @@ Held-out test set: 100 perturbations whose identities we don't see during traini
 
 **Milestone 2.2**: Phase 2 — perturbation prediction with AdaLN. Architecture additions:
 - Perturbation embedding: `nn.Embedding(num_perturbations, 64)` (~150 train + 50 val + 100 test = up to 300, but we only see ~150 during train; need a strategy for unseen)
-- AdaLN-conditioned predictor (4 layers, 4 heads, like `lewm_vcc.py` Phase 2)
+- AdaLN-conditioned predictor (4 layers, 4 heads, like the proxy LeWM Phase 2)
 - Loss: MSE(z_pred, z_target.detach()) + λ·SIGReg(z_source)
 - Train: predict (control cell, perturbation) → perturbed cell embedding
 
@@ -125,20 +129,17 @@ latent-space/
   pyproject.toml               # updated deps
   .python-version              # 3.12
   data/
-    vcc/                       # already exists
-    vcc-zarr/                  # to be created in Phase 1
-  src/                         # NEW: structured code instead of single scripts
-    lewm_vcc/
-      __init__.py
-      data.py                  # zarr dataset, samplers
-      models.py                # encoder, predictor, AdaLN
-      losses.py                # SIGReg, MSE wrappers
-      train.py                 # main training loop
-      eval.py                  # internal val, submission generation
-      submit.py                # cell-eval format writer
+    vcc/                       # h5ad files (gitignored)
+  src/lewm/                    # structured package
+    __init__.py
+    data.py                    # CSR dataset, stratified sampler — DONE
+    models.py                  # encoder, predictor, AdaLN — Phase 2
+    losses.py                  # SIGReg, MSE wrappers — Phase 2
+    train.py                   # main training loop — Phase 2
+    eval.py                    # internal val, submission gen — Phase 2
+    submit.py                  # cell-eval format writer — Phase 2
   scripts/
-    convert_h5ad_to_zarr.py    # one-time conversion
-    smoke_test.py              # phase 0 validation
+    smoke_test.py              # Phase 1 validation — DONE
   results/
     vcc/                       # outputs go here
   legacy/                      # ALL OLD CODE

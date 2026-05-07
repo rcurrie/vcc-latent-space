@@ -964,7 +964,6 @@ dependencies = [
     { name = "scipy" },
     { name = "torch" },
     { name = "tqdm" },
-    { name = "zarr" },
 ]
 
 [package.optional-dependencies]
@@ -991,7 +990,6 @@ requires-dist = [
     { name = "torch", specifier = ">=2.11.0" },
     { name = "tqdm", specifier = ">=4.66" },
     { name = "umap-learn", marker = "extra == 'dev'", specifier = ">=0.5.7" },
-    { name = "zarr", specifier = ">=3.0" },
 ]
 provides-extras = ["dev"]
 
