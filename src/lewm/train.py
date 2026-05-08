@@ -45,6 +45,7 @@ from .models import (
     compute_gene_features,
     gene_set_mask,
 )
+from .optimizers import PopRiskAdamW
 
 
 @dataclass
@@ -80,6 +81,11 @@ class TrainConfig:
     eval_every: int = 2  # epochs
     out_dir: str = "results/vcc"
     seed: int = 0
+    # population-risk gate (Litman & Guo 2026)
+    use_population_gate: bool = False
+    gate_alpha: float = 1.0       # 1.0 = fresh-batch boundary; b/(n-b) = formal
+    gate_lambda_pop: float = 0.0  # soft-gate denom scale; 0 = mostly-binary
+    gate_rho: float = 0.99        # variance EMA decay
 
 
 def select_device() -> torch.device:
@@ -93,6 +99,23 @@ def select_device() -> torch.device:
 def log_metrics(out_dir: Path, **kwargs) -> None:
     with open(out_dir / "metrics.jsonl", "a") as f:
         f.write(json.dumps(kwargs, default=float) + "\n")
+
+
+def _build_optimizer(param_groups, cfg: TrainConfig):
+    """Build either AdamW (default) or PopRiskAdamW depending on cfg flag.
+
+    param_groups is the same structure expected by torch.optim — either a
+    list of params or a list of {'params': ..., 'lr': ...} dicts.
+    """
+    if cfg.use_population_gate:
+        return PopRiskAdamW(
+            param_groups,
+            weight_decay=cfg.weight_decay,
+            rho=cfg.gate_rho,
+            alpha=cfg.gate_alpha,
+            lambda_pop=cfg.gate_lambda_pop,
+        )
+    return torch.optim.AdamW(param_groups, weight_decay=cfg.weight_decay)
 
 
 def train_phase1(
@@ -109,8 +132,8 @@ def train_phase1(
     """
     encoder.train(); jepa_predictor.train()
     params = list(encoder.parameters()) + list(jepa_predictor.parameters())
-    optim = torch.optim.AdamW(
-        params, lr=cfg.phase1_lr, weight_decay=cfg.weight_decay
+    optim = _build_optimizer(
+        [{"params": params, "lr": cfg.phase1_lr}], cfg,
     )
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(optim, T_max=cfg.phase1_epochs)
 
@@ -159,13 +182,18 @@ def train_phase1(
         avg_pred = ep_pred / n_batches
         avg_sig = ep_sig / n_batches
         lr_now = sched.get_last_lr()[0]
+        gate_stats = optim.gate_stats() if isinstance(optim, PopRiskAdamW) else {}
+        gate_str = (
+            f" | q_mean={gate_stats['mean_q']:.2f} q_kill={gate_stats['frac_killed']:.2f}"
+            if gate_stats else ""
+        )
         print(
             f"  ep {epoch:3d}/{cfg.phase1_epochs} | pred={avg_pred:.4f} | "
-            f"sigreg={avg_sig:.5f} | lr={lr_now:.2e} | {elapsed:.1f}s"
+            f"sigreg={avg_sig:.5f} | lr={lr_now:.2e}{gate_str} | {elapsed:.1f}s"
         )
         log_metrics(
             out_dir, phase="2.1", epoch=epoch, pred=avg_pred, sigreg=avg_sig,
-            lr=lr_now, time_s=elapsed,
+            lr=lr_now, time_s=elapsed, **gate_stats,
         )
 
     print(f"Phase 2.1 done in {total_time:.1f}s ({total_time/cfg.phase1_epochs:.1f}s/epoch)")
@@ -200,12 +228,12 @@ def train_phase2(
     encoder.train(); pert_predictor.train(); decoder.train()
     enc_params = list(encoder.parameters())
     pred_params = list(pert_predictor.parameters()) + list(decoder.parameters())
-    optim = torch.optim.AdamW(
+    optim = _build_optimizer(
         [
             {"params": enc_params, "lr": cfg.phase2_encoder_lr},
             {"params": pred_params, "lr": cfg.phase2_predictor_lr},
         ],
-        weight_decay=cfg.weight_decay,
+        cfg,
     )
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(optim, T_max=cfg.phase2_epochs)
 
@@ -286,14 +314,19 @@ def train_phase2(
         avg_dec = ep_dec / n_batches
         avg_sig = ep_sig / n_batches
         lr_pred = sched.get_last_lr()[1]
+        gate_stats = optim.gate_stats() if isinstance(optim, PopRiskAdamW) else {}
+        gate_str = (
+            f" | q_mean={gate_stats['mean_q']:.2f} q_kill={gate_stats['frac_killed']:.2f}"
+            if gate_stats else ""
+        )
         print(
             f"  ep {epoch:3d}/{cfg.phase2_epochs} | "
             f"pred={avg_pred:.4f} | dec={avg_dec:.4f} | sigreg={avg_sig:.5f} | "
-            f"lr_pred={lr_pred:.2e} | {elapsed:.1f}s"
+            f"lr_pred={lr_pred:.2e}{gate_str} | {elapsed:.1f}s"
         )
         log_metrics(
             out_dir, phase="2.2", epoch=epoch, pred=avg_pred, dec=avg_dec,
-            sigreg=avg_sig, lr_pred=lr_pred, time_s=elapsed,
+            sigreg=avg_sig, lr_pred=lr_pred, time_s=elapsed, **gate_stats,
         )
         if eval_fn is not None and epoch % cfg.eval_every == 0:
             eval_fn(epoch)

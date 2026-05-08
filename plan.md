@@ -108,11 +108,21 @@ This is exactly the failure mode the flow-matching paper read predicted: MSE poi
 1. **Contrastive auxiliary loss on perturbation centroids.** Add a term that pushes predictions for pert A closer to A's actual centroid than to other perts' centroids. Directly targets the PDS failure without changing the architecture. Cheapest fix to try first. Expected: ~+0.1-0.2 PDS uplift.
 2. **Stronger action conditioning.** Replace the 3-feature gene MLP with the target gene's full expression vector across controls (18080-dim) → MLP. Gives the predictor much more signal about what "knocking down gene X" actually means.
 3. **Pseudobulk-only training.** Predict per-perturbation mean expression directly. Easier task, won't capture cell-level heterogeneity but should fix PDS immediately. Useful as a sanity check baseline.
-4. **Population-risk gate** (Litman & Guo 2026) — per-parameter SNR mask on AdamW. ~10 lines. Won't fix mean collapse but may help once that's addressed.
-5. **Flow matching predictor** — replace MSE point prediction with conditional flow matching. Predicts a velocity field; samples land in the actual post-pert distribution. Larger structural change, addresses root cause.
-6. **MCR² overlay** — add MCR² loss with target_gene as 150-class partition labels. Stack on SIGReg.
-7. **Gene-set attention encoder** — replace MLP with attention over pathway-grouped genes. Future, important for biology.
-8. **Multi-step rollouts** — MPC-style for sequence optimization. Future research.
+4. **Flow matching predictor** — replace MSE point prediction with conditional flow matching. Predicts a velocity field; samples land in the actual post-pert distribution. Larger structural change, addresses root cause.
+5. **MCR² overlay** — add MCR² loss with target_gene as 150-class partition labels. Stack on SIGReg.
+6. **Gene-set attention encoder** — replace MLP with attention over pathway-grouped genes. Future, important for biology.
+7. **Multi-step rollouts** — MPC-style for sequence optimization. Future research.
+
+**Tried and not pursued — population-risk gate (Litman & Guo 2026).** Implemented as `PopRiskAdamW` in `src/lewm/optimizers.py`, kept dormant behind `cfg.use_population_gate`. A/B on Phase 2.1 (4 epochs, fixed seeds, identical loaders):
+
+| α | final pred MSE | SIGReg | params killed |
+|---|---|---|---|
+| gate off | **0.044** | -0.310 | — |
+| α=1.0 (paper default) | 0.338 | -0.276 | 100% |
+| α=0.1 | 0.061 | -0.305 | 94% |
+| α=0.01 | 0.051 | -0.308 | 77% |
+
+The gate kills too many parameters at any α value where it does anything; at the formal `α = b/(n-b) ≈ 0.0024` it would be essentially a no-op. Diagnosis: scRNA-seq has very high per-parameter gradient variance from biological noise (dropout, batch effects, intra-perturbation cell variation) — the "noise" the gate was designed to suppress is mostly real-but-small signal in our regime. The paper's wins (grokking, PINN, DPO) all involve more structured signal-vs-noise contrasts than ours. Code retained but disabled by default.
 
 ## Hardware sanity checks (M4 + 32GB)
 
