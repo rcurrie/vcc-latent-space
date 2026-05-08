@@ -9,6 +9,11 @@ isotropically.
 
 This is the unsupervised replacement for MCR2/EMA-based collapse prevention
 used in the LeWorldModel paper (Maes, Le Lidec, LeCun et al. 2026).
+
+Phase 3 adds `contrastive_centroid_loss`: an InfoNCE-style auxiliary that
+prevents predictions from collapsing to the global mean by requiring each
+predicted cell's embedding to be closer to its own perturbation's actual
+centroid than to other perturbations' centroids in the same batch.
 """
 from __future__ import annotations
 
@@ -72,3 +77,86 @@ def sigreg_loss(
     for k in range(n_projections):
         total = total + epps_pulley_statistic(projections[:, k])
     return total / n_projections
+
+
+def contrastive_centroid_loss(
+    z_pred: torch.Tensor,
+    z_actual: torch.Tensor,
+    pert_id: torch.Tensor,
+    is_control: torch.Tensor | None = None,
+    temperature: float = 0.1,
+    min_perts: int = 2,
+) -> tuple[torch.Tensor, dict]:
+    """InfoNCE-style loss: each predicted cell should sit closer to its own
+    perturbation's centroid (in z_actual space) than to other perturbations'
+    centroids.
+
+    Steps:
+      1. For each unique non-control perturbation in the batch, build its
+         actual-centroid c_g = mean(z_actual[pert_id == g]).
+      2. For each non-control predicted cell z_pred_i with pert g_i, compute
+         softmax cross-entropy where the target class is the index of
+         centroid g_i and the logits are -|| z_pred_i - c_g ||^2 / τ
+         (negative squared distance, equivalently the squared cosine if z's
+         are unit-normalized — but our embeddings live in R^d so we use
+         negative L2 distance which has the same monotonicity).
+      3. Average over predicted cells.
+
+    Controls (pert_id == 0 or is_control == True) are skipped — they don't
+    have a target perturbation centroid.
+
+    Returns
+    -------
+    loss : scalar tensor
+    diag : dict of diagnostics (n_perts, n_pred_cells, mean_logit_gap)
+    """
+    if is_control is None:
+        is_control = pert_id == 0
+
+    # Indices of non-control cells
+    nc_mask = ~is_control
+    if nc_mask.sum() == 0:
+        return z_pred.new_zeros(()), {"n_perts": 0, "n_cells": 0}
+
+    nc_pert_ids = pert_id[nc_mask]                     # (M,)
+    z_actual_nc = z_actual[nc_mask]                    # (M, D)
+    z_pred_nc = z_pred[nc_mask]                        # (M, D)
+
+    # Unique perturbations present in the batch (non-control only)
+    unique_perts, inv = torch.unique(nc_pert_ids, return_inverse=True)
+    n_perts = unique_perts.shape[0]
+    if n_perts < min_perts:
+        return z_pred.new_zeros(()), {"n_perts": int(n_perts), "n_cells": 0}
+
+    # Build per-pert actual centroids by scatter-mean
+    D = z_actual_nc.shape[1]
+    centroids = z_actual_nc.new_zeros(n_perts, D)
+    counts = z_actual_nc.new_zeros(n_perts)
+    centroids.index_add_(0, inv, z_actual_nc)
+    counts.index_add_(0, inv, torch.ones_like(inv, dtype=z_actual_nc.dtype))
+    centroids = centroids / counts.unsqueeze(-1).clamp(min=1.0)
+
+    # Negative squared L2 distance from each predicted cell to each centroid
+    # logits[i, j] = -|| z_pred_i - c_j ||^2 / τ
+    # = (-||z_pred||^2 + 2 z_pred · c - ||c||^2) / τ
+    # We can compute it via cdist for clarity:
+    dists_sq = torch.cdist(z_pred_nc, centroids, p=2).pow(2)   # (M, n_perts)
+    logits = -dists_sq / temperature
+
+    # Cross-entropy with target = index of own centroid
+    loss = torch.nn.functional.cross_entropy(logits, inv)
+
+    # Diagnostic: average gap between own-centroid logit and best-other logit
+    with torch.no_grad():
+        own_logit = logits.gather(1, inv.unsqueeze(1)).squeeze(1)
+        masked = logits.clone()
+        masked.scatter_(1, inv.unsqueeze(1), float("-inf"))
+        best_other = masked.max(dim=1).values
+        gap = (own_logit - best_other).mean().item()
+
+    diag = {
+        "n_perts": int(n_perts),
+        "n_cells": int(nc_mask.sum().item()),
+        "mean_logit_gap": gap,
+    }
+    return loss, diag

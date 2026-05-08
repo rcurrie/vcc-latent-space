@@ -103,9 +103,24 @@ Held-out test set: 100 perturbations whose identities we don't see during traini
 
 This is exactly the failure mode the flow-matching paper read predicted: MSE point prediction collapses to the conditional mean; distributional matching would preserve modes.
 
-### Phase 3 — Fix mean collapse (in priority order)
+### Phase 3 — Fix mean collapse
 
-1. **Contrastive auxiliary loss on perturbation centroids.** Add a term that pushes predictions for pert A closer to A's actual centroid than to other perts' centroids. Directly targets the PDS failure without changing the architecture. Cheapest fix to try first. Expected: ~+0.1-0.2 PDS uplift.
+1. **Contrastive auxiliary loss on perturbation centroids — DONE, NULL ON OOD.** `lewm.losses.contrastive_centroid_loss`: per batch, compute the actual-centroid `c_g = mean(z_actual over cells with pert g)` for each perturbation present. Each predicted cell `(z_pred_i, gene_g_i)` is a query whose target class is its own centroid (negative-L2² / τ logits, softmax cross-entropy). Default τ=1.0, weight 1.0; gradient flows into both predictor (via `z_pred`) and encoder (via centroid `z_target`).
+
+   **Training-time signal: clearly works.** The training loss converged from 5.3 → 0.16, and the logit gap (own-centroid vs best-other) climbed from -4.5 to +9.1 — predictions sit firmly closer to their own centroid than to others. Internal val DR (10 held-out training perts) held at ~0.77 throughout vs baseline degrading to 0.64.
+
+   **Validation-time signal (50 unseen perts): essentially unchanged.**
+
+   | Metric | Baseline | Contrastive | Δ |
+   |---|---|---|---|
+   | PDS | 0.500 | 0.506 | +0.006 (noise) |
+   | DES | 0.075 | 0.071 | -0.004 |
+   | MAE (log1p CP10k) | 0.014 | 0.015 | +0.001 |
+   | pred_emb_mse (val) | 0.012 | **0.18** | +0.17 ⚠️ |
+
+   **Diagnosis: in-distribution gain, no out-of-distribution transfer.** The internal val perts share the encoder's learned structure (the encoder has seen sister cells from the same perturbations during training, since the held-out perts were drawn from the *training file* not the *validation file*). The 50 validation perturbations are truly unseen and the model's `ActionEmbed(gene_idx) → action_emb` mapping has no incentive to generalize: the contrastive loss can be satisfied by memorizing the 140 training centroids in the action MLP, which is exactly what it appears to do. The val-time pred_emb_mse jump from 0.012 → 0.18 means contrastive training spread predictions further from actuals on truly-unseen perts (because predictions were pushed apart in the latent space without anchoring around actual val-pert structure).
+
+   **Implication for next steps**: contrastive alone won't fix the architecture's weak inductive bias for perturbation generalization. The 3-feature gene-stat embedding (`MLP(mean, dispersion, frac_expr)`) is too thin a signal — the action MLP can fit training perts arbitrarily without learning a transferable rule. Move to fix #2 (richer action conditioning) and re-test contrastive on top of that.
 2. **Stronger action conditioning.** Replace the 3-feature gene MLP with the target gene's full expression vector across controls (18080-dim) → MLP. Gives the predictor much more signal about what "knocking down gene X" actually means.
 3. **Pseudobulk-only training.** Predict per-perturbation mean expression directly. Easier task, won't capture cell-level heterogeneity but should fix PDS immediately. Useful as a sanity check baseline.
 4. **Flow matching predictor** — replace MSE point prediction with conditional flow matching. Predicts a velocity field; samples land in the actual post-pert distribution. Larger structural change, addresses root cause.

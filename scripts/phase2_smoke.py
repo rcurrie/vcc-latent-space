@@ -30,8 +30,11 @@ if __name__ == "__main__":
         decoder_hidden=256,
         sigreg_projections=16,
         phase1_epochs=1,
-        phase2_epochs=1,
+        phase2_epochs=2,
         eval_every=1,
         out_dir="results/vcc-smoke",
+        # Phase 3 #1: contrastive auxiliary loss
+        contrastive_weight=1.0,
+        contrastive_temperature=1.0,
     )
     main(cfg)

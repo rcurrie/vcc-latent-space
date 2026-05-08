@@ -18,9 +18,9 @@ Inspired by:
 
 ## Status
 
-Phase 2 baseline complete. ~57min training on M4/MPS produces a model that learns a meaningful latent representation but exhibits **mean collapse** in perturbation prediction: PDS=0.500 (chance) on the 50 held-out validation perturbations. Diagnosis and Phase 3 fixes in [plan.md](plan.md).
+Phase 2 baseline + Phase 3.1 (contrastive aux loss) complete. The contrastive loss fixes mean collapse in-distribution (training-time logit gap went from -4.5 to +9.1, internal val DR held at 0.77) but **does not transfer to unseen perturbations** — PDS on the 50-pert validation set is essentially unchanged (0.500 → 0.506). The bottleneck is the weak action-conditioning signal: `ActionEmbed` has only 3 per-gene features (mean, dispersion, frac-expr) so the predictor can fit training perts arbitrarily without learning a transferable rule. Next: stronger action conditioning (Phase 3.2).
 
-![](docs/phase2_training.png)
+![](docs/phase3_contrastive_training.png)
 
 The MNIST proxy work that validated the architecture (3/4 perturbations passing DR>2 with SIGReg + AdaLN + joint training) is preserved in [legacy/](legacy/).
 

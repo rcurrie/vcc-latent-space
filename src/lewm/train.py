@@ -35,7 +35,7 @@ from .data import (
     normalize,
     CONTROL_LABEL,
 )
-from .losses import sigreg_loss
+from .losses import sigreg_loss, contrastive_centroid_loss
 from .models import (
     ActionEmbed,
     Decoder,
@@ -68,6 +68,11 @@ class TrainConfig:
     sigreg_projections: int = 64
     decoder_weight: float = 1.0
     context_ratio: float = 0.75
+    # Phase 3 #1: contrastive auxiliary loss on perturbation centroids.
+    # Pushes z_pred for pert g toward the actual centroid of g and away
+    # from other perts' centroids. Targets mean collapse directly.
+    contrastive_weight: float = 0.0   # 0.0 = disabled (default for backward compat)
+    contrastive_temperature: float = 1.0
     # optimization
     phase1_epochs: int = 30
     phase1_lr: float = 1e-3
@@ -265,9 +270,11 @@ def train_phase2(
     pert_to_gene_idx_t = torch.tensor(pert_to_gene_idx, dtype=torch.long, device=device)
 
     total_time = 0.0
+    use_contrastive = cfg.contrastive_weight > 0.0
     for epoch in range(1, cfg.phase2_epochs + 1):
         t0 = time.perf_counter()
-        ep_pred = ep_dec = ep_sig = 0.0
+        ep_pred = ep_dec = ep_sig = ep_con = 0.0
+        ep_logit_gap = 0.0
         n_batches = 0
         for x, pert_id, _batch, is_control in loader:
             x = x.to(device)
@@ -298,6 +305,15 @@ def train_phase2(
             sig_loss = sigreg_loss(z_target, n_projections=cfg.sigreg_projections)
             loss = pred_loss + cfg.decoder_weight * dec_loss + cfg.sigreg_weight * sig_loss
 
+            if use_contrastive:
+                con_loss, con_diag = contrastive_centroid_loss(
+                    z_post, z_target, pert_id, is_control,
+                    temperature=cfg.contrastive_temperature,
+                )
+                loss = loss + cfg.contrastive_weight * con_loss
+                ep_con += con_loss.item()
+                ep_logit_gap += con_diag.get("mean_logit_gap", 0.0)
+
             optim.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(enc_params + pred_params, cfg.grad_clip)
@@ -313,20 +329,30 @@ def train_phase2(
         avg_pred = ep_pred / n_batches
         avg_dec = ep_dec / n_batches
         avg_sig = ep_sig / n_batches
+        avg_con = ep_con / n_batches if use_contrastive else 0.0
+        avg_gap = ep_logit_gap / n_batches if use_contrastive else 0.0
         lr_pred = sched.get_last_lr()[1]
         gate_stats = optim.gate_stats() if isinstance(optim, PopRiskAdamW) else {}
         gate_str = (
             f" | q_mean={gate_stats['mean_q']:.2f} q_kill={gate_stats['frac_killed']:.2f}"
             if gate_stats else ""
         )
+        con_str = (
+            f" | con={avg_con:.3f} gap={avg_gap:+.2f}"
+            if use_contrastive else ""
+        )
         print(
             f"  ep {epoch:3d}/{cfg.phase2_epochs} | "
-            f"pred={avg_pred:.4f} | dec={avg_dec:.4f} | sigreg={avg_sig:.5f} | "
-            f"lr_pred={lr_pred:.2e}{gate_str} | {elapsed:.1f}s"
+            f"pred={avg_pred:.4f} | dec={avg_dec:.4f} | sigreg={avg_sig:.5f}"
+            f"{con_str} | lr_pred={lr_pred:.2e}{gate_str} | {elapsed:.1f}s"
         )
+        extras = {}
+        if use_contrastive:
+            extras["con"] = avg_con
+            extras["logit_gap"] = avg_gap
         log_metrics(
             out_dir, phase="2.2", epoch=epoch, pred=avg_pred, dec=avg_dec,
-            sigreg=avg_sig, lr_pred=lr_pred, time_s=elapsed, **gate_stats,
+            sigreg=avg_sig, lr_pred=lr_pred, time_s=elapsed, **gate_stats, **extras,
         )
         if eval_fn is not None and epoch % cfg.eval_every == 0:
             eval_fn(epoch)
