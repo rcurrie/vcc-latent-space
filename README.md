@@ -18,9 +18,28 @@ Inspired by:
 
 ## Status
 
-See [plan.md](plan.md) for the active roadmap.
+Phase 2 baseline complete. ~57min training on M4/MPS produces a model that learns a meaningful latent representation but exhibits **mean collapse** in perturbation prediction: PDS=0.500 (chance) on the 50 held-out validation perturbations. Diagnosis and Phase 3 fixes in [plan.md](plan.md).
+
+![](docs/phase2_training.png)
 
 The MNIST proxy work that validated the architecture (3/4 perturbations passing DR>2 with SIGReg + AdaLN + joint training) is preserved in [legacy/](legacy/).
+
+## Run
+
+```bash
+# Smoke test the data path (~10s)
+python scripts/smoke_test.py
+
+# Tiny smoke test of Phase 2 wiring (~90s)
+python scripts/phase2_smoke.py
+
+# Full training (~1h on M4/MPS)
+python -m lewm.train
+
+# Score against the validation file
+python scripts/score_validation.py
+python scripts/plot_training.py
+```
 
 ## Setup
 

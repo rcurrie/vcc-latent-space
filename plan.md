@@ -72,46 +72,47 @@ Held-out test set: 100 perturbations whose identities we don't see during traini
 
 **Smoke test results** (on M4, MPS): 6.5s load, 120ms/batch (data + 9.4M-param MLP forward). Full epoch projected at ~52s. 9 unique perts per batch as designed; batch normalization stats look reasonable (x.mean≈0.30, x.std≈0.45).
 
-### Phase 2 — Baseline LeWM on VCC (target: first end-to-end submission)
+### Phase 2 — Baseline LeWM on VCC — DONE
 
-**Milestone 2.1**: Phase 1 — homeostatic pretraining on non-targeting controls (~38k cells). Architecture matches `lewm_scrna.py`:
-- Encoder: 18080 → 512 → 512 → embed_dim (256), BN projector, no L2 norm
-- JEPA gene-set masking (75% context / 25% target)
-- Loss: MSE(z_pred, z_target.detach()) + λ·SIGReg(z)
-- Eval: UMAP of control cells, check coherent structure (no collapse, batch-effect awareness)
+**Architecture (`src/lewm/`)**:
+- Encoder: 18080 → 512 → 512 → 256, BatchNorm projector, no L2 norm
+- JEPAPredictor: 256 → 256 MLP (gene-set masking, Phase 2.1 only)
+- ActionEmbed: gene_idx → 64-dim action via MLP over 3 frozen per-gene features (mean expression, dispersion, fraction expressing) computed from training controls. Generalizes to unseen perts because the gene panel is shared across train/val/test.
+- PerturbationPredictor: 4 AdaLN-conditioned transformer blocks (zero-init), `(z_cell, gene_idx) → z_post`
+- Decoder: 256 → 1024 → 18080 with softplus output
 
-**Milestone 2.2**: Phase 2 — perturbation prediction with AdaLN. Architecture additions:
-- Perturbation embedding: `nn.Embedding(num_perturbations, 64)` (~150 train + 50 val + 100 test = up to 300, but we only see ~150 during train; need a strategy for unseen)
-- AdaLN-conditioned predictor (4 layers, 4 heads, like the proxy LeWM Phase 2)
-- Loss: MSE(z_pred, z_target.detach()) + λ·SIGReg(z_source)
-- Train: predict (control cell, perturbation) → perturbed cell embedding
+**Training**:
+- Phase 2.1: 30 epochs encoder + JEPA on 38k controls. Loss = MSE_pred + SIGReg.
+- Phase 2.2: 40 epochs joint encoder + predictor + decoder on 211k cells (10 perts held out as internal val). Each batch contains 25% controls + 8 perts × 48 cells; perturbed cells pair with random controls from the batch as their source. Loss = MSE_pred + decoder_MSE + SIGReg.
+- Total: 57 min on M4/MPS, no NaN, SIGReg stays converged at -0.31.
 
-**Decision point — unseen perturbations**: VCC test set has perturbations we never see at training. Options:
-  - (a) Train a perturbation embedding per gene; for unseen, use a learned default ("zero perturbation embedding" or mean of seen embeddings)
-  - (b) Condition on a **gene-level feature vector** (e.g., target gene's homeostatic expression mean across controls) instead of a learned embedding. This generalizes to unseen genes by construction.
-  - (c) Use the gene's expression vector itself as the conditioning signal (knockdown ≈ "remove this gene's contribution")
+**Internal val** (10 held-out training perts):
+- pred_emb_mse: 1.11 → 0.72 (encoder predictions are 56% closer to actual perturbed embeddings than the source control)
+- pert_dr: started ~1.0, dropped to 0.5, recovered to 0.64. Below the 1.0 "useful discrimination" line.
 
-For first submission: option (b) — use the target gene's row in the var matrix (or an embedding from a frozen pretrained encoder of that gene's expression pattern across controls). Defer (c) as a future refinement.
+**Validation scores** (50 unseen perturbations from VCC validation file):
 
-**Milestone 2.3**: Decoder back to gene space. The world model lives in embedding space, but VCC requires predictions in gene-expression space. Need a decoder: `embed_dim → gene_dim`. Train as part of Phase 2 with reconstruction loss against actual perturbed cells.
+| Metric | Value | Read |
+|---|---|---|
+| PDS | **0.500** | Chance. Predictions don't distinguish their target perturbation from others. |
+| DES | **0.075** | Faint signal — few of the actual top DEGs appear in our predicted top DEGs. |
+| MAE (log1p CP10k) | 0.014 | Low, but most genes don't move under any one knockdown — largely measuring "predict no change". |
+| pred_emb MSE | 0.012 | Embeddings are well-aligned in absolute terms. |
 
-**Milestone 2.4**: First end-to-end forward pass — given a (control cell, perturbation gene) pair, produce a predicted gene expression vector. Validate output is in valid range (non-negative log-normalized values).
+**Diagnosis: mean collapse.** The model learned a single "average post-perturbation displacement vector" instead of N=150 different vectors. Classic failure of MSE-trained conditional generators when the conditioning signal is weak relative to within-condition variance: the MSE-optimal point estimate is the conditional mean `E[z_actual | gene_idx, z_ctrl]`, and with ~1500 cells per pert + a small action MLP, that mean is approximately the global mean.
 
-**Milestone 2.5**: Run on internal val (the 10 training perts we held out). Compute proxy metrics: cosine similarity to actual perturbed cells; per-gene MAE.
+This is exactly the failure mode the flow-matching paper read predicted: MSE point prediction collapses to the conditional mean; distributional matching would preserve modes.
 
-**Milestone 2.6**: Generate submission. For each test perturbation, sample N control cells, run prediction, write h5ad in cell-eval format. Run `cell-eval prep` locally to validate format.
+### Phase 3 — Fix mean collapse (in priority order)
 
-**Milestone 2.7**: First VCC submission. Score it. Establish baseline numbers.
-
-### Phase 3 — Iterate (after baseline submitted)
-
-In priority order, gated on baseline performance:
-
-1. **Population-risk gate** (Litman & Guo 2026) — add the per-parameter SNR mask to AdamW. ~10 lines, free experiment, may suppress noise-fitting on real scRNA-seq data.
-2. **MCR² overlay** — add MCR² loss with target_gene as the partition labels (we have ~150 classes). Stack on top of SIGReg.
-3. **Flow matching predictor** — replace MSE point prediction with conditional flow matching. Treat perturbation outcome as a distribution, not a point. Needed if VCC scoring favors distributional fidelity (it mostly doesn't, but if PDS rewards it, this matters).
-4. **Gene-set attention encoder** — replace MLP with attention over pathway-grouped genes. Important if MLP underfits real biology.
-5. **Multi-step rollouts** — MPC-style for perturbation sequence optimization. Future research, not for VCC.
+1. **Contrastive auxiliary loss on perturbation centroids.** Add a term that pushes predictions for pert A closer to A's actual centroid than to other perts' centroids. Directly targets the PDS failure without changing the architecture. Cheapest fix to try first. Expected: ~+0.1-0.2 PDS uplift.
+2. **Stronger action conditioning.** Replace the 3-feature gene MLP with the target gene's full expression vector across controls (18080-dim) → MLP. Gives the predictor much more signal about what "knocking down gene X" actually means.
+3. **Pseudobulk-only training.** Predict per-perturbation mean expression directly. Easier task, won't capture cell-level heterogeneity but should fix PDS immediately. Useful as a sanity check baseline.
+4. **Population-risk gate** (Litman & Guo 2026) — per-parameter SNR mask on AdamW. ~10 lines. Won't fix mean collapse but may help once that's addressed.
+5. **Flow matching predictor** — replace MSE point prediction with conditional flow matching. Predicts a velocity field; samples land in the actual post-pert distribution. Larger structural change, addresses root cause.
+6. **MCR² overlay** — add MCR² loss with target_gene as 150-class partition labels. Stack on SIGReg.
+7. **Gene-set attention encoder** — replace MLP with attention over pathway-grouped genes. Future, important for biology.
+8. **Multi-step rollouts** — MPC-style for sequence optimization. Future research.
 
 ## Hardware sanity checks (M4 + 32GB)
 
@@ -132,16 +133,17 @@ latent-space/
     vcc/                       # h5ad files (gitignored)
   src/lewm/                    # structured package
     __init__.py
-    data.py                    # CSR dataset, stratified sampler — DONE
-    models.py                  # encoder, predictor, AdaLN — Phase 2
-    losses.py                  # SIGReg, MSE wrappers — Phase 2
-    train.py                   # main training loop — Phase 2
-    eval.py                    # internal val, submission gen — Phase 2
-    submit.py                  # cell-eval format writer — Phase 2
+    data.py                    # CSR dataset, stratified sampler
+    models.py                  # encoder, AdaLN predictor, decoder
+    losses.py                  # SIGReg
+    train.py                   # main training loop
+    eval.py                    # internal val + score against held-out split
   scripts/
-    smoke_test.py              # Phase 1 validation — DONE
-  results/
-    vcc/                       # outputs go here
+    smoke_test.py              # Phase 1 validation
+    phase2_smoke.py            # Phase 2 wiring sanity (1+1 epochs)
+    score_validation.py        # load checkpoint, score on validation file
+    plot_training.py           # post-training summary figures
+  results/vcc/                 # outputs (gitignored)
   legacy/                      # ALL OLD CODE
     geo_jepa_simple.py
     lewm_scrna.py              # save the LeWM v1 for reference
@@ -152,36 +154,12 @@ latent-space/
 
 Move from single-file scripts to a small package — VCC code will be too large to keep as one file, and we'll need to import models from training and submission scripts.
 
-## What we're explicitly NOT doing in Phase 2
+## Note on cell-eval / VCC submission
 
-- Hyperparameter search beyond reasonable defaults (defer until baseline scored)
-- Multi-stage curriculum (Phase 1 then Phase 2 separately, no joint pre-training)
-- Architecture exploration (one MLP encoder, one AdaLN predictor — match `lewm_scrna.py`)
-- Pretrained gene embeddings or external biological priors (defer)
-- Ensembling, test-time augmentation
-- The population-risk gate (Phase 3 item)
-- MCR² (Phase 3 item)
+The 2025 competition is closed, so we don't generate cell-eval submission files. Instead `scripts/score_validation.py` runs our own approximations of VCC's three metrics (PDS via L1 ranking, DES via top-K DEG Jaccard, MAE in log1p CP10k) against the validation file. This lets us iterate locally without a network round-trip.
 
-Goal of Phase 2 is "submit something honest and find out where we stand," not "win the leaderboard."
+## Open questions for Phase 3
 
-## Verification — concrete pass/fail criteria
-
-| Phase | Pass criterion |
-|---|---|
-| 0 | `python scripts/smoke_test.py` runs in <30s, prints data shapes |
-| 1.1 | Zarr conversion completes without errors, files exist on disk |
-| 1.2 | Full epoch iterates in <5min |
-| 2.1 | Phase 1 training completes 20 epochs, SIGReg converges, no NaN, UMAP shows non-degenerate structure |
-| 2.2 | Phase 2 training completes, prediction MSE on internal val < trivial baseline (predict the control cell unchanged) |
-| 2.5 | Internal val: predicted cells closer to actual perturbed cells than to control cells (cosine similarity, mean over perturbations) |
-| 2.6 | `cell-eval prep` accepts our h5ad |
-| 2.7 | VCC leaderboard returns a score (any score — establishing baseline) |
-
-## Open questions to resolve as we go
-
-1. How does VCC handle multiple control cells per perturbation? Do we predict per-cell or per-perturbation pseudobulks?
-2. What's the exact gene order/identity in the test set? Need to align with training var.
-3. Are batch effects something we should explicitly model (the data has a `batch` column)?
-4. cell-eval — do we run the evaluator locally before submission to validate format?
-
-These get answered during Phase 1 by reading the cell-eval source and any starter docs.
+1. **Mean collapse**: which fix is most cost-effective? Try the contrastive auxiliary loss first (smallest change, largest expected uplift on PDS).
+2. **Batch effects**: the data has a `batch` column we ignore. Are predictions of unseen perturbations confounded by which batch they came from? Worth a check before/after Phase 3.
+3. **Per-cell vs pseudobulk training**: since cell-eval scores can be computed from per-pert pseudobulks, do we lose anything by training on pseudobulks directly? Faster + may sidestep mean collapse entirely.
