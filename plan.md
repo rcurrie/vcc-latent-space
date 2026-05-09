@@ -121,6 +121,25 @@ This is exactly the failure mode the flow-matching paper read predicted: MSE poi
    **Diagnosis: in-distribution gain, no out-of-distribution transfer.** The internal val perts share the encoder's learned structure (the encoder has seen sister cells from the same perturbations during training, since the held-out perts were drawn from the *training file* not the *validation file*). The 50 validation perturbations are truly unseen and the model's `ActionEmbed(gene_idx) → action_emb` mapping has no incentive to generalize: the contrastive loss can be satisfied by memorizing the 140 training centroids in the action MLP, which is exactly what it appears to do. The val-time pred_emb_mse jump from 0.012 → 0.18 means contrastive training spread predictions further from actuals on truly-unseen perts (because predictions were pushed apart in the latent space without anchoring around actual val-pert structure).
 
    **Implication for next steps**: contrastive alone won't fix the architecture's weak inductive bias for perturbation generalization. The 3-feature gene-stat embedding (`MLP(mean, dispersion, frac_expr)`) is too thin a signal — the action MLP can fit training perts arbitrarily without learning a transferable rule. Move to fix #2 (richer action conditioning) and re-test contrastive on top of that.
+
+2. **ESM2 protein-embedding action conditioning (UCE-style) — DONE, FIRST REAL OOD SIGNAL.** Replace `ActionEmbed = MLP(3 features)` with `ProteinActionEmbed = MLP(5120-d ESM2 row)`. ESM2 embeddings are precomputed by `scripts/build_esm2_panel.py` from the human ESM2-15B table; covers 98.3% of the 18,080-gene panel and 100% of all train/val/test perturbations. Fallback to a small learned per-gene embedding for the 1.7% of panel genes (mostly antisense / lincRNA / pseudogenes) without an ESM2 row.
+
+   **Cost**: +2M trainable params (the projection MLP), ~10% slower per epoch due to the larger forward in the action path. ESM2 buffer is 370MB on disk, lives on GPU as a frozen tensor.
+
+   **Validation scores** (50 unseen perturbations from VCC validation file):
+
+   | Metric | Baseline | Contrastive only | ESM2 + Contrastive |
+   |---|---|---|---|
+   | **PDS** | 0.500 | 0.506 | **0.544** (+0.044) |
+   | DES | 0.075 | 0.071 | 0.076 (~equal) |
+   | MAE (log1p CP10k) | 0.014 | 0.015 | 0.015 (~equal) |
+   | pred_emb_mse (val) | 0.012 | 0.181 | 0.057 (much better than contrastive-only) |
+
+   **First real OOD signal.** PDS is the metric most directly testing perturbation discrimination on unseen genes — the model has a measurable improvement on perturbations it has truly never seen. DES (top-K DEG Jaccard) didn't move, suggesting we're capturing aggregate-direction effects but not yet the specific DEG signatures.
+
+   **The trade-off**: training-time discrimination is much stronger (gap +13 vs +9 for contrastive-only by ep15), and *internal* val DR is *worse* (0.66 vs 0.77) — clear training-pert memorization. But the model trades that in-distribution memorization for some generalization to OOD perts via protein-sequence neighborhoods. This is a healthy sign: the model is learning something protein-similarity-aware, not just memorizing.
+
+   **Why DES didn't move**: PDS rewards L1-distance ranking on the full profile, which is an aggregate signal. DES rewards specific DEG identification, which requires the decoder to map from latent z to fine-grained per-gene effects. The decoder MSE was steady at 0.028 throughout, suggesting the decoder isn't yet specializing per-perturbation. A natural next step is decoder conditioning on the perturbation embedding too (the action signal currently only feeds into the predictor).
 2. **Stronger action conditioning.** Replace the 3-feature gene MLP with the target gene's full expression vector across controls (18080-dim) → MLP. Gives the predictor much more signal about what "knocking down gene X" actually means.
 3. **Pseudobulk-only training.** Predict per-perturbation mean expression directly. Easier task, won't capture cell-level heterogeneity but should fix PDS immediately. Useful as a sanity check baseline.
 4. **Flow matching predictor** — replace MSE point prediction with conditional flow matching. Predicts a velocity field; samples land in the actual post-pert distribution. Larger structural change, addresses root cause.

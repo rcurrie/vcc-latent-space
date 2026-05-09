@@ -18,9 +18,15 @@ Inspired by:
 
 ## Status
 
-Phase 2 baseline + Phase 3.1 (contrastive aux loss) complete. The contrastive loss fixes mean collapse in-distribution (training-time logit gap went from -4.5 to +9.1, internal val DR held at 0.77) but **does not transfer to unseen perturbations** — PDS on the 50-pert validation set is essentially unchanged (0.500 → 0.506). The bottleneck is the weak action-conditioning signal: `ActionEmbed` has only 3 per-gene features (mean, dispersion, frac-expr) so the predictor can fit training perts arbitrarily without learning a transferable rule. Next: stronger action conditioning (Phase 3.2).
+Phase 3.2 (ESM2 protein-embedding action conditioning + contrastive aux loss) complete. **First real OOD signal**: PDS on the 50-pert validation set rises from chance (0.500) to 0.544. The protein embeddings give the action MLP a transferable signal — genes encoding similar proteins get similar action embeddings by construction, so the model can interpolate to unseen perturbations via sequence-space neighbors. DES (top-K DEG Jaccard) is still flat though, suggesting decoder specialization is still missing.
 
-![](docs/phase3_contrastive_training.png)
+| | Baseline | Contrastive | ESM2 + Contrastive |
+|---|---|---|---|
+| PDS | 0.500 (chance) | 0.506 | **0.544** |
+| DES | 0.075 | 0.071 | 0.076 |
+| pred_emb (val) | 0.012 | 0.181 ⚠️ | 0.057 |
+
+![](docs/phase32_protein_contrastive_training.png)
 
 The MNIST proxy work that validated the architecture (3/4 perturbations passing DR>2 with SIGReg + AdaLN + joint training) is preserved in [legacy/](legacy/).
 
