@@ -17,43 +17,21 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-import numpy as np
 import torch
 
 from lewm.data import load_split
 from lewm.eval import score_against_split
-from lewm.models import (
-    ActionEmbed,
-    Decoder,
-    MLPEncoder,
-    PerturbationPredictor,
-    compute_gene_features,
-)
-from lewm.train import TrainConfig, select_device
+from lewm.train import TrainConfig, build_models, select_device
 
 
 def load_models_from_checkpoint(ckpt_path: Path, train_split, device: torch.device):
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     cfg_dict = ckpt["config"]
     cfg = TrainConfig(**cfg_dict)
-
-    encoder = MLPEncoder(train_split.n_genes, cfg.embed_dim, cfg.hidden_dim).to(device)
+    encoder, _jepa, pert_predictor, decoder = build_models(train_split, cfg, device)
     encoder.load_state_dict(ckpt["encoder"])
-
-    print("computing per-gene features from training controls ...")
-    ctrl_idx = np.where(train_split.control_mask)[0]
-    gene_feats = compute_gene_features(train_split.X, ctrl_idx).to(device)
-    action_embed = ActionEmbed(
-        gene_feats, action_dim=cfg.action_dim, hidden_dim=cfg.action_dim,
-    ).to(device)
-    pert_predictor = PerturbationPredictor(
-        cfg.embed_dim, action_embed, n_layers=cfg.adaln_layers, n_heads=cfg.adaln_heads,
-    ).to(device)
     pert_predictor.load_state_dict(ckpt["pert_predictor"])
-
-    decoder = Decoder(cfg.embed_dim, train_split.n_genes, cfg.decoder_hidden).to(device)
     decoder.load_state_dict(ckpt["decoder"])
-
     return encoder, pert_predictor, decoder, cfg
 
 

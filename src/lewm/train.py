@@ -42,6 +42,7 @@ from .models import (
     JEPAPredictor,
     MLPEncoder,
     PerturbationPredictor,
+    ProteinActionEmbed,
     compute_gene_features,
     gene_set_mask,
 )
@@ -73,6 +74,13 @@ class TrainConfig:
     # from other perts' centroids. Targets mean collapse directly.
     contrastive_weight: float = 0.0   # 0.0 = disabled (default for backward compat)
     contrastive_temperature: float = 1.0
+    # Phase 3 #2: ESM2 protein-embedding based action conditioning. Every
+    # gene in the var_names panel has a (frozen) ESM2 row precomputed by
+    # scripts/build_esm2_panel.py. ProteinActionEmbed projects 5120 -> action_dim
+    # via a learned MLP. Generalizes to unseen perts by sequence similarity.
+    use_protein_action_embed: bool = False
+    protein_panel_path: str = "data/vcc/gene_esm2_panel.pt"
+    protein_proj_hidden: int = 256
     # optimization
     phase1_epochs: int = 30
     phase1_lr: float = 1e-3
@@ -380,17 +388,42 @@ def _build_pert_to_gene_idx_map(split) -> np.ndarray:
 def build_models(split, cfg: TrainConfig, device: torch.device):
     """Construct encoder, JEPA pred, ActionEmbed, PerturbationPred, Decoder.
 
-    Gene features for ActionEmbed are precomputed from this split's controls.
+    ActionEmbed has two flavors:
+      - ActionEmbed: 3 per-gene stat features computed from controls (default).
+      - ProteinActionEmbed: ESM2 protein embeddings precomputed by
+        scripts/build_esm2_panel.py. Set cfg.use_protein_action_embed=True.
     """
     encoder = MLPEncoder(split.n_genes, cfg.embed_dim, cfg.hidden_dim).to(device)
     jepa = JEPAPredictor(cfg.embed_dim, cfg.jepa_hidden).to(device)
-    print("computing per-gene features from controls ...")
-    ctrl_idx = np.where(split.control_mask)[0]
-    gene_feats = compute_gene_features(split.X, ctrl_idx).to(device)
-    print(f"  gene_features: {tuple(gene_feats.shape)}")
-    action_embed = ActionEmbed(
-        gene_feats, action_dim=cfg.action_dim, hidden_dim=cfg.action_dim,
-    ).to(device)
+
+    if cfg.use_protein_action_embed:
+        print(f"loading ESM2 panel from {cfg.protein_panel_path} ...")
+        panel = torch.load(cfg.protein_panel_path, weights_only=False, map_location="cpu")
+        prot_emb = panel["embeddings"]
+        coverage = panel["coverage"]
+        # Sanity: panel ordering must match split.var_names
+        if list(panel["var_names"]) != list(split.var_names):
+            raise RuntimeError(
+                "ESM2 panel var_names do not match split var_names — "
+                f"panel built for a different gene order. Rebuild with "
+                f"scripts/build_esm2_panel.py."
+            )
+        print(f"  protein embeddings: {tuple(prot_emb.shape)}, "
+              f"covered: {int(coverage.sum().item())}/{coverage.numel()} "
+              f"({100*coverage.float().mean().item():.1f}%)")
+        action_embed = ProteinActionEmbed(
+            prot_emb, coverage,
+            action_dim=cfg.action_dim,
+            hidden_dim=cfg.protein_proj_hidden,
+        ).to(device)
+    else:
+        print("computing per-gene features from controls ...")
+        ctrl_idx = np.where(split.control_mask)[0]
+        gene_feats = compute_gene_features(split.X, ctrl_idx).to(device)
+        print(f"  gene_features: {tuple(gene_feats.shape)}")
+        action_embed = ActionEmbed(
+            gene_feats, action_dim=cfg.action_dim, hidden_dim=cfg.action_dim,
+        ).to(device)
     pert_predictor = PerturbationPredictor(
         cfg.embed_dim, action_embed, n_layers=cfg.adaln_layers, n_heads=cfg.adaln_heads,
     ).to(device)

@@ -110,6 +110,72 @@ class ActionEmbed(nn.Module):
         return emb * mask
 
 
+class ProteinActionEmbed(nn.Module):
+    """Map a target gene's column index to an action embedding via a
+    precomputed ESM2 protein embedding.
+
+    protein_embeddings: (n_genes, P) frozen tensor. Rows where coverage is
+    False (gene was missing from the ESM2 table) are zero in the buffer;
+    we additionally route those through a small learned 'unknown gene'
+    embedding to avoid silently aliasing them all to the same zero action.
+
+    Generalizes to unseen perturbations because the ESM2 embedding is
+    purely a function of the gene's protein sequence — every gene in the
+    panel has a real or fallback embedding precomputed.
+    """
+    def __init__(
+        self,
+        protein_embeddings: torch.Tensor,
+        coverage: torch.Tensor,
+        action_dim: int = 64,
+        hidden_dim: int = 256,
+    ):
+        super().__init__()
+        # Frozen buffers (clone to detach from caller-owned numpy / mmap memory).
+        self.register_buffer(
+            "protein_embeddings",
+            protein_embeddings.detach().clone().float().contiguous(),
+        )
+        self.register_buffer(
+            "coverage",
+            coverage.detach().clone().bool().contiguous(),
+        )
+        n_genes, P = protein_embeddings.shape
+
+        # Tiny per-gene embedding for fallback rows. Indexed only when
+        # coverage[gene_idx] is False, so most rows are wasted memory but
+        # only ~300 rows are ever used. Allocate the full 18080 to avoid a
+        # second indexing scheme.
+        self.fallback = nn.Embedding(n_genes, action_dim)
+        nn.init.zeros_(self.fallback.weight)
+
+        # Project ESM2 -> action space.
+        self.proj = nn.Sequential(
+            nn.Linear(P, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, action_dim),
+        )
+
+    @property
+    def action_dim(self) -> int:
+        return self.proj[-1].out_features
+
+    def forward(self, gene_idx: torch.Tensor) -> torch.Tensor:
+        # gene_idx may contain -1 (control / unknown). Clamp for the lookup,
+        # then mask out the result for those positions.
+        safe_idx = gene_idx.clamp(min=0)
+        prot = self.protein_embeddings[safe_idx]            # (B, P)
+        emb_main = self.proj(prot)                           # (B, A)
+        emb_fall = self.fallback(safe_idx)                   # (B, A)
+
+        covered = self.coverage[safe_idx].float().unsqueeze(-1)
+        emb = covered * emb_main + (1.0 - covered) * emb_fall
+
+        # Control / unknown gene_idx -> zero embedding.
+        valid_mask = (gene_idx >= 0).float().unsqueeze(-1)
+        return emb * valid_mask
+
+
 class AdaLNBlock(nn.Module):
     """Transformer block with Adaptive Layer Normalization.
 
