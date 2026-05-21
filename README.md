@@ -85,4 +85,4 @@ VCC 2025 data in `data/vcc/`:
 - `adata_Test.h5ad` — 100 more disjoint perturbations
 - `gene_esm2_panel.pt` — UCE-shipped ESM2-15B embeddings (5120-dim)
 
-The v1 codebase (`src/lewm/*.py` plus `legacy/`) and earlier MNIST proxy work are preserved as a reference trail.
+v1 building blocks that v2 reuses (encoder, predictor, AdaLN block, SIGReg, contrastive centroid loss, data loader) live in `src/lewm/`. Earlier MNIST proxy exploration in `legacy/`. The full v1 training/eval/scoring code (Phase 2 / 3.x recipes, population-risk gate experiment, plotting scripts) was deleted in favor of v2 — recoverable via `git log` if needed.
