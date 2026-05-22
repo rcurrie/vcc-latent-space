@@ -14,35 +14,42 @@ Three phases. The world model is shaped entirely by latent-space objectives — 
 
 ## Results
 
-Official 50-perturbation VCC validation set, gene-space metrics:
+Three held-out splits, in increasing order of generalization difficulty / honesty:
 
-| metric | v1 best | **v2 A1** | Δ |
-|---|---|---|---|
-| **PDS** | 0.544 | **0.571** | **+0.027** |
-| **DES** | 0.076 | **0.089** | **+0.013** |
-| MAE | 0.015 | 0.017 | +0.002 |
+| split | n perts | what it is | PDS | DES | MAE |
+|---|---|---|---|---|---|
+| internal-val (15 perts carved from training) | 15 | Phase B training-time monitor; latent-PDS only | 0.552 | — | — |
+| `adata_Validation.h5ad` | 50 | **dev set; we made model-recipe decisions here** | 0.571 | 0.089 | 0.017 |
+| `adata_Test.h5ad` | 100 | **never touched until final scoring — leaderboard-comparable** | **0.528** | **0.084** | **0.017** |
 
-Total training: ~2 hours on M4. Latent-PDS on internal held-out (15 perts carved from training) reaches 0.552 at convergence; gene-space PDS = 0.571 once decoded.
+**The headline is the Test number: PDS=0.528, DES=0.084.** It is +0.028 above chance (0.500), a real OOD generalization signal. The Validation number (0.571) is +0.043 above Test because we used Validation for model selection (A1, A3, big-decoder ablations were all decided on val metrics), not because the model is genuinely that good on novel perturbations.
+
+Total training: ~2 hours on M4.
+
+Caveats on comparing to the published VCC 2025 leaderboard:
+
+- The official scoring uses the [cell-eval](https://github.com/ArcInstitute/cell-eval) library with a gene-set-restricted L1 metric and cohort normalization. Our scoring uses full-panel L1 with our own implementation (`src/lewm/v2/eval_gene.py`). The two metrics aren't bit-identical — there's a known offset we haven't quantified.
+- v1's reported PDS=0.544 was also on Validation, never on Test. A fair v1-vs-v2 comparison would re-score v1's checkpoint on Test; we have the checkpoint but the v1 eval module is in git history (pruned in commit `9a1eb45`) — recoverable.
 
 ## Approach lineage and ablations
 
-The path to v2 A1 was a sequence of falsified hypotheses. Each row is one experiment we ran on the way:
+The path to v2 A1 was a sequence of falsified hypotheses. Each row is one experiment we ran on the way. All `PDS`/`DES` numbers in this table are on `adata_Validation.h5ad` (50 perts) — *that's the set we made decisions on*. The headline Test number (0.528) above is the proper held-out score after the recipe was locked.
 
-| variant | result | takeaway |
-|---|---|---|
-| v1 baseline (gene-space joint train + SIGReg) | PDS=0.500 | mean collapse on stochastic count data |
-| v1 + InfoNCE contrastive | PDS=0.506 | in-dist OK, no OOD transfer |
-| v1 + ESM2 protein actions | PDS=0.544 | first real OOD signal — kept the idea, pivoted everything else |
-| v2 SIGReg-only Phase A | rank=2 of 256 | invariance-alone collapse; SIGReg with K projections not enough |
-| v2 SIGReg + VICReg variance+covariance | rank=249 | works, but recreates VICReg + decorative SIGReg |
-| v2 SIGReg fresh K=1024 (var/cov off) | rank=4 | falsifies "more directions = real Cramér-Wold pressure" claim |
-| **v2 MCR²-marginal (no SIGReg, no VICReg)** | **rank=255** | single rate-distortion log-det handles variance + decorrelation |
-| v2 + JEPA masked-genes aux | JEPA rises ↑ over training | JEPA *competes* with MCR² (predictability vs spread) |
-| v2 Phase B with InfoNCE | latent-PDS=0.614, gene-PDS=0.550 | great in latent, hurt gene-space DES |
-| **v2 A1: drop InfoNCE** | **latent-PDS=0.552, gene-PDS=0.571, DES=0.089** | **final recipe** |
-| A3 τ=0.3 (heavier aug) | PDS=0.547 | aug too aggressive |
-| A3 τ=0.7 (lighter aug) | PDS=0.549 | aug too gentle; τ=0.5 is the sweet spot |
-| Bigger decoder (4×2048 vs 2×1024) | PDS=0.573, DES=0.082 | decoder capacity not the bottleneck — bigger actually *hurts* DES |
+| variant | val PDS | val DES | takeaway |
+|---|---|---|---|
+| v1 baseline (gene-space joint + SIGReg) | 0.500 | 0.075 | mean collapse on stochastic count data |
+| v1 + InfoNCE contrastive | 0.506 | 0.071 | in-dist OK, no OOD transfer |
+| v1 + ESM2 protein actions | 0.544 | 0.076 | first real OOD signal — kept the idea, pivoted everything else |
+| v2 SIGReg-only Phase A | (rank=2/256) | — | invariance-alone collapse; K projections not enough |
+| v2 SIGReg + VICReg var+cov | (rank=249/256) | — | works, but recreates VICReg + decorative SIGReg |
+| v2 SIGReg fresh K=1024 (var/cov off) | (rank=4/256) | — | falsifies "more directions = real Cramér-Wold pressure" claim |
+| **v2 MCR²-marginal (no SIGReg, no VICReg)** | (rank=255/256) | — | single rate-distortion log-det handles variance + decorrelation |
+| v2 + JEPA masked-genes aux | — | — | JEPA *competes* with MCR² (predictability vs spread); dropped |
+| v2 Phase B with InfoNCE | 0.550 | 0.073 | latent-PDS=0.614 great, but decoder can't translate tight clusters |
+| **v2 A1: drop InfoNCE** (chosen) | **0.571** | **0.089** | **best on val; Test=0.528 / 0.084** |
+| A3 τ=0.3 (heavier aug) | 0.547 | 0.082 | aug too aggressive |
+| A3 τ=0.7 (lighter aug) | 0.549 | 0.082 | aug too gentle; τ=0.5 is the sweet spot |
+| Bigger decoder (4×2048) | 0.573 | 0.082 | decoder capacity not the bottleneck — bigger *hurts* DES |
 
 **Two robust empirical findings from the journey:**
 
@@ -71,7 +78,10 @@ uv run python scripts/v2/freeze_internal_val_split.py    # freeze 15-pert intern
 # Full v2 pipeline (~2 hours on M4)
 uv run python scripts/v2/run_phase_a.py --epochs 30
 uv run python scripts/v2/run_phase_b.py --epochs 40 --contrastive-weight 0.0   # A1 recipe
-uv run python scripts/v2/run_phase_c.py --epochs 20                            # trains decoder + scores VCC val
+uv run python scripts/v2/run_phase_c.py --epochs 20                            # trains decoder + scores Validation
+
+# After everything else: score against the never-touched Test file (the honest number)
+uv run python scripts/v2/score_test.py
 
 # Smoke test
 uv run python scripts/v2/smoke_test.py

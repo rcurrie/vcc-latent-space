@@ -230,27 +230,67 @@ diversity stress test.
 
 ## 4. Final numbers and meaning
 
-**Headline (v2 A1, official 50-pert VCC validation file, gene-space):**
+The VCC distribution has **three** splits: Training (150 perts + controls),
+Validation (50 disjoint perts), and Test (100 more disjoint perts). The
+correct held-out / leaderboard-comparable score is the **Test** number.
+Validation is the dev set we made model-recipe decisions against (A1
+ablation, A3 augmentation sweep, big-decoder ablation were all decided
+based on Validation metrics). So Validation numbers are slightly
+optimistic; Test numbers are honest.
 
-| metric | v1 best (Phase 3.2) | **v2 A1** | Δ |
-|---|---|---|---|
-| **PDS** | 0.544 | **0.571** | **+0.027** |
-| **DES** | 0.076 | **0.089** | **+0.013** |
-| MAE  | 0.014–0.015 | 0.017 | +0.002 |
+| split | n perts | role | PDS | DES | MAE |
+|---|---|---|---|---|---|
+| internal-val (15 perts carved from Training) | 15 | Phase B training-time monitor; latent-only | 0.552 | — | — |
+| `adata_Validation.h5ad` | 50 | dev set; **we model-selected here** | 0.571 | 0.089 | 0.017 |
+| **`adata_Test.h5ad`** | **100** | **never touched until final scoring — honest** | **0.528** | **0.084** | 0.017 |
 
-PDS = 0.571 means **on average 57% of the *other* 49 perturbations have
-their actual centroid *farther* from the predicted centroid than the
-matching one is**. Chance is 0.50; perfect is 1.00. The +0.027 over v1
-is a real, statistically meaningful generalization gain on the metric
-that defines the contest.
+### What the headline number means
 
-DES = 0.089 means the predicted top-100 up- and down-regulated DEGs share
-~9% of their elements with the actual DEGs on average. This is small in
-absolute terms — DES is genuinely hard — but +0.013 over v1 means the
-predictor is starting to produce per-perturbation-specific direction
-patterns, not just calling the same DEGs for every prediction.
+**PDS = 0.528 on Test** means *on average 53% of the other 99 test
+perturbations have their actual centroid farther from the predicted
+centroid than the matching one is*. Chance is 0.500; perfect is 1.000.
+We're +0.028 above chance on 100 entirely unseen perturbations — a real
+out-of-distribution generalization signal, but not a transformative one.
 
-MAE +0.002 is within decoder convergence noise and not load-bearing.
+**DES = 0.084** means the predicted top-100 up- and down-regulated DEGs
+share ~8% of their elements with the actual DEGs on average. DES is
+genuinely hard; any non-trivial value indicates the predictor is
+producing per-perturbation-specific direction patterns rather than calling
+the same DEGs for every prediction.
+
+**MAE = 0.017** in log1p(CP10k) space is essentially the same as v1's
+0.014–0.015 — close to what a "predict the control mean" baseline gives.
+MAE has never been the contest's discriminative metric.
+
+### Validation vs. Test: the implicit-model-selection penalty
+
+PDS dropped from **0.571 (val)** to **0.528 (test)**, a 0.043 gap. This
+quantifies how much we implicitly overfit to Validation by using it for
+model selection — picking A1 over the baseline, picking τ=0.5 over 0.3
+and 0.7, ruling out the bigger decoder. Each of those calls was made on
+~50-pert noise; some fraction of "0.571 > 0.550" was real-recipe quality
+and some was variance in a finite eval set.
+
+In a contest, the leaderboard would have been computed on Test (or
+something like it). 0.528 is what we'd actually have placed with.
+
+### Comparison to the published VCC 2025 leaderboard
+
+We don't have a clean comparison to record:
+
+- We never ran our predictions through the official **cell-eval** library.
+  The leaderboard uses cell-eval's gene-set-restricted L1 with cohort
+  normalization, not our full-panel L1. Numbers aren't bit-identical.
+- We don't have verified leaderboard PDS numbers from training data.
+  The v2 sketch referenced the Altos Labs flow-matching entry as winning
+  but didn't record their score.
+- v1's reported 0.544 was also a Validation number; we never scored v1
+  on Test. A fair v1-vs-v2 comparison would re-score v1 on Test (the
+  Phase 3.2 checkpoint is on disk; v1's `src/lewm/eval.py` would need to
+  be restored from git history — pruned in commit `9a1eb45`).
+
+To get a literal leaderboard number we'd need (a) plumb predictions into
+cell-eval and (b) pull the public leaderboard. Tracked as a follow-up.
 
 ### Two robust empirical lessons
 
@@ -511,6 +551,10 @@ The three innovations the tutor should be ready to defend:
    PCA-compressed, single-linear projected** — gives unseen genes a real
    action embedding without an MLP that can memorize 150 training perts.
 
-The result is **PDS = 0.571 / DES = 0.089** on the official 50-pert
-validation, vs v1's 0.544 / 0.076 — a real generalization gain with a
-substantially simpler recipe operating purely in latent space.
+The result is **PDS = 0.528 / DES = 0.084** on the never-touched 100-pert
+Test file (the leaderboard-comparable held-out set). The Validation-set
+number that we made model decisions against was **0.571 / 0.089** — a
+0.043 PDS gap quantifying how much implicit model selection slipped in.
+Both numbers are above v1's reported 0.544 / 0.076 (which was also on
+Validation, never on Test, so the v1-vs-v2 comparison isn't strictly
+apples-to-apples until we re-score v1 on Test).
