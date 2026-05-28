@@ -29,6 +29,7 @@ def main():
     ap.add_argument("--mcr2-weight", type=float, default=cfg.mcr2_weight)
     ap.add_argument("--mcr2-eps-sq", type=float, default=cfg.mcr2_eps_sq)
     ap.add_argument("--contrastive-weight", type=float, default=cfg.contrastive_weight)
+    ap.add_argument("--pseudobulk-weight", type=float, default=cfg.pseudobulk_weight)
     ap.add_argument("--eval-every", type=int, default=cfg.eval_every)
     ap.add_argument("--num-workers", type=int, default=cfg.num_workers)
     ap.add_argument("--phase-a-checkpoint", type=str, default=cfg.phase_a_checkpoint)
@@ -48,6 +49,7 @@ def main():
         mcr2_weight=args.mcr2_weight,
         mcr2_eps_sq=args.mcr2_eps_sq,
         contrastive_weight=args.contrastive_weight,
+        pseudobulk_weight=args.pseudobulk_weight,
         eval_every=args.eval_every,
         num_workers=args.num_workers,
         phase_a_checkpoint=args.phase_a_checkpoint,

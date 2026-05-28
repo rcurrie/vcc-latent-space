@@ -57,7 +57,7 @@ def main():
     ckpt_b = torch.load(args.phase_b_checkpoint, weights_only=False, map_location=device)
     cfg_b = ckpt_b["config"]
     print(f"loaded Phase B: {args.phase_b_checkpoint}")
-    print(f"  final latent PDS: {ckpt_b['final_metrics'].get('latent_pds', 'n/a')}")
+    print(f"  final latent PDS: {ckpt_b.get('final_metrics', {}).get('latent_pds', ckpt_b.get('pds', 'n/a'))}")
 
     ckpt_c = torch.load(args.phase_c_checkpoint, weights_only=False, map_location=device)
     cfg_c = ckpt_c["config"]

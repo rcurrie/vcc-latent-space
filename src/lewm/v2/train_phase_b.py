@@ -92,6 +92,12 @@ class PhaseBConfig:
     # v1-style contrastive aux, kept available as ablation
     contrastive_weight: float = 0.0
     contrastive_temperature: float = 1.0
+    # Pseudo-bulk auxiliary: per-pert centroid MSE on top of per-cell L_pred.
+    # Within-pert variance in 48 cells per batch is huge; per-cell MSE is
+    # dominated by within-pert noise. Adding a centroid-level term focuses
+    # gradient on the systematic per-pert shift — what VCC actually scores.
+    # 0.0 disables. Controls are excluded from centroids (no target pert).
+    pseudobulk_weight: float = 0.0
     # optimization
     epochs: int = 40
     encoder_lr: float = 1e-4
@@ -269,6 +275,31 @@ def train_phase_b(cfg: PhaseBConfig) -> dict:
                  + cfg.invariance_weight * L_inv
                  + cfg.mcr2_weight * L_mcr2)
 
+            # Pseudo-bulk auxiliary: per-pert centroid MSE on z_post vs z_target.
+            # Excludes controls (no target pert). Averages within-pert noise so
+            # gradient focuses on the systematic per-pert latent shift.
+            if cfg.pseudobulk_weight > 0:
+                nc_mask = ~is_control
+                if nc_mask.any():
+                    pert_nc = pert_id[nc_mask]
+                    unique, inv_idx = torch.unique(pert_nc, return_inverse=True)
+                    n_perts_b = unique.shape[0]
+                    D = z_post.shape[1]
+                    post_c = z_post.new_zeros(n_perts_b, D)
+                    tgt_c = z_post.new_zeros(n_perts_b, D)
+                    cnt = z_post.new_zeros(n_perts_b)
+                    post_c.index_add_(0, inv_idx, z_post[nc_mask])
+                    tgt_c.index_add_(0, inv_idx, z_target[nc_mask].detach())
+                    cnt.index_add_(0, inv_idx, torch.ones_like(inv_idx, dtype=z_post.dtype))
+                    cnt = cnt.clamp(min=1.0).unsqueeze(-1)
+                    post_c = post_c / cnt
+                    tgt_c = tgt_c / cnt
+                    L_pb = F.mse_loss(post_c, tgt_c)
+                    L = L + cfg.pseudobulk_weight * L_pb
+                    sums["pb"] = sums.get("pb", 0.0) + float(L_pb.detach())
+                else:
+                    sums["pb"] = sums.get("pb", 0.0)
+
             if use_contrastive:
                 L_con, con_diag = contrastive_centroid_loss(
                     z_post, z_target, pert_id, is_control,
@@ -338,6 +369,18 @@ def train_phase_b(cfg: PhaseBConfig) -> dict:
                     "pds": lp.pds,
                     "top1": lp.top1_acc,
                 }
+                # Live-save to disk immediately. v5 ep38 termination lost both
+                # final and peak-sidecar checkpoints because we only saved at
+                # the end of training; never again.
+                best_path_live = out_dir / "checkpoint_best_pds.pt"
+                torch.save(
+                    {
+                        **best_state,
+                        "config": asdict(cfg),
+                        "note": "Best-PDS sidecar, live-saved at each new high.",
+                    },
+                    str(best_path_live),
+                )
 
         with open(out_dir / "metrics.jsonl", "a") as f:
             f.write(json.dumps(avg, default=float) + "\n")
@@ -350,6 +393,8 @@ def train_phase_b(cfg: PhaseBConfig) -> dict:
         )
         if use_contrastive:
             line += f"con={avg['con']:.3f} gap={avg['logit_gap']:+.2f} "
+        if cfg.pseudobulk_weight > 0 and "pb" in avg:
+            line += f"pb={avg['pb']:.4f} "
         if lp is not None:
             line += f"| PDS={lp.pds:.3f} top1={lp.top1_acc:.3f} "
         line += f"({epoch_time:.1f}s)"

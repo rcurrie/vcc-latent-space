@@ -34,6 +34,80 @@ from lewm.models import (  # noqa: F401
 )
 
 
+class ResidualPerturbationPredictor(nn.Module):
+    """Predictor that explicitly returns `z_source + delta`.
+
+    Wraps the v1 PerturbationPredictor (AdaLN-conditioned transformer) but
+    adds a zero-initialized output projection so the predictor truly starts
+    at identity. The trainable part has to learn only the *delta from
+    baseline* — the perturbation effect — rather than the absolute target
+    location.
+
+    Why this matters:
+      - v1 PerturbationPredictor called itself "AdaLN-zero" but only
+        zero-init'd the AdaLN scale/shift parameters, not an output gate.
+        At init, the attention residual inside each block contributes a
+        non-zero shift; the predictor was *near-identity* but not exactly
+        identity, and the predicted z_post lived on the same scale as
+        z_target (~5–10 in latent space).
+      - With explicit `z_source + delta` and a zero-init out_proj, the
+        delta starts as zero. The loss at init is `||z_source − z_target||²`
+        — the natural "predict no change" baseline. Each gradient step
+        moves the delta toward `z_target − z_source`, a much
+        smaller-magnitude target.
+      - Standard ResNet-style argument: residual reparameterizations have
+        better optimization dynamics when the identity is a reasonable
+        starting solution.
+
+    Note: the wrapper has the same forward signature as the v1
+    PerturbationPredictor, so it's a drop-in replacement in Phase B/C code.
+    """
+
+    def __init__(
+        self,
+        embed_dim: int,
+        action_embed,
+        n_layers: int = 4,
+        n_heads: int = 4,
+    ):
+        super().__init__()
+        # action_embed is owned by self.core only — don't double-register
+        # at the wrapper level or state_dict gets duplicate keys.
+        self.core = PerturbationPredictor(
+            embed_dim=embed_dim,
+            action_embed=action_embed,
+            n_layers=n_layers,
+            n_heads=n_heads,
+        )
+        # Zero-init residual head. At init, out_proj(x) == 0 for all x, so
+        # forward returns z_source unchanged.
+        self.out_proj = nn.Linear(embed_dim, embed_dim)
+        nn.init.zeros_(self.out_proj.weight)
+        nn.init.zeros_(self.out_proj.bias)
+
+    @property
+    def action_embed(self):
+        # Pass-through accessor for callers that expect predictor.action_embed
+        # (e.g. Phase C decoder lookup).
+        return self.core.action_embed
+
+    def forward(
+        self,
+        z_source: torch.Tensor,
+        gene_idx: torch.Tensor,
+    ) -> torch.Tensor:
+        core_out = self.core(z_source, gene_idx)
+        delta = self.out_proj(core_out)
+        # Detach z_source on the additive identity path so the encoder doesn't
+        # see "make z_source == z_target" pressure via the residual skip — that
+        # would collapse the control and perturbed distributions into the same
+        # cluster (observed empirically: PR=158 → PR=3 in epoch 1 without this
+        # detach). The encoder still gets shaped by L_pred via core_out's
+        # dependence on z_source (and by L_inv + L_mcr2 directly), but not
+        # via the magnitude-dominant identity skip.
+        return z_source.detach() + delta
+
+
 class ProteinActionEmbedV2(nn.Module):
     """Single-linear projection of a (PCA-reduced) ESM2 panel to action_dim.
 

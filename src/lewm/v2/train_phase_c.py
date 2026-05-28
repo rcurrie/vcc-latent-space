@@ -159,7 +159,7 @@ def train_phase_c(cfg: PhaseCConfig) -> dict:
     action_embed.load_state_dict(ckpt["action_embed"])
     predictor.load_state_dict(ckpt["predictor"])
     print(f"loaded Phase B checkpoint from {cfg.phase_b_checkpoint}")
-    print(f"  Phase B final PDS={ckpt['final_metrics'].get('latent_pds', 'n/a')}")
+    print(f"  Phase B final PDS={ckpt.get('final_metrics', {}).get('latent_pds', ckpt.get('pds', 'n/a'))}")
 
     # Freeze everything from Phase B. Decoder is the only trainable component.
     _freeze(encoder, action_embed, predictor)
