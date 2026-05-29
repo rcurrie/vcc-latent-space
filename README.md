@@ -1,4 +1,4 @@
-# latent-space
+# vcc-latent-space
 
 An exploration of latent-space world-model approaches for the [Virtual Cell Challenge 2025](https://virtualcellchallenge.org). What started as a LeJEPA-style latent prediction pipeline ended as a hybrid: a frozen SSL encoder paired with a small linear gene-space delta head — because that's what the data turned out to need.
 
