@@ -28,6 +28,15 @@ Final result on the never-touched 100-perturbation Test file (the leaderboard-co
 
 Intra-class variance is ~67× the between-class signal. Single-cell prediction objectives spend almost all of their gradient fighting noise. Pseudo-bulk averaging removes that noise — and is exactly what the published VCC 2025 winners did (Arc Institute reported "purely AI-based approaches did not consistently outperform statistical baselines"). Our v5 centroid-only variant tried this in latent space and lifted latent-PDS to 0.610, but the gene-space decoder couldn't translate that gain. Going directly to pseudo-bulk gene-space delta prediction (hybrid simple-head) is what finally moved the Test number.
 
+## Negative result: neighborhood aggregation does not lift DES
+
+A follow-up investigation asked whether overlapping-KNN neighborhood pseudo-bulk on the frozen encoder — a bias/variance dial on neighborhood size `k` — could lift the hybrid's DES by giving predictions realistic within-perturbation *spread*. It does not. Two things came out of it:
+
+- **The official `cell-eval` scorer is now wired in** ([scripts/v2/score_celleval.py](scripts/v2/score_celleval.py)), replacing our full-panel-L1 approximation with the real leaderboard metrics and population-emitting inference. Re-baselined hybrid simple-head: **Test DES 0.055 / PDS 0.556** (`overlap_at_N` / `discrimination_score_l1`); PDS agrees with the 0.538 approximation.
+- **Spread is not the lever.** Emitting a neighborhood-level population did not move DES off that floor, and a cross-validated diagnostic showed the per-neighborhood delta's genuine (baseline-state-cancelled) predictability from latent position is ~0.5–5% R² — noise. The perturbation signal is a *mean* shift; there is no structured within-perturbation spread to organize, consistent with the 0.015 variance ratio above. A constant delta is, to first order, the right model — which is why the simple-head already captured it.
+
+Full write-up: [docs/des_neighborhood_negative_result.md](docs/des_neighborhood_negative_result.md); step-by-step metrics in `results/nbhd/`.
+
 ## Comments on latent vs gene space
 
 We spent most of the project in pure latent space, motivated by:

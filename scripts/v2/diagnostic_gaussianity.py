@@ -54,6 +54,85 @@ from lewm.v2.train_phase_a import select_device
 from lewm.data import normalize
 
 
+# Tirosh/Regev-lab cell-cycle markers (human symbols). 43 S-phase + 54 G2M.
+# Standard list shipped with the scanpy cell-cycle tutorial. Some symbols are
+# aliases that may be absent from the VCC panel — we intersect with var_names
+# and log how many matched, so a missing alias just drops out of the score.
+TIROSH_S_GENES = [
+    "MCM5", "PCNA", "TYMS", "FEN1", "MCM2", "MCM4", "RRM1", "UNG", "GINS2",
+    "MCM6", "CDCA7", "DTL", "PRIM1", "UHRF1", "MLF1IP", "HELLS", "RFC2",
+    "RPA2", "NASP", "RAD51AP1", "GMNN", "WDR76", "SLBP", "CCNE2", "UBR7",
+    "POLD3", "MSH2", "ATAD2", "RAD51", "RRM2", "CDC45", "CDC6", "EXO1",
+    "TIPIN", "DSCC1", "BLM", "CASP8AP2", "USP1", "CLSPN", "POLA1", "CHAF1B",
+    "BRIP1", "E2F8",
+]
+TIROSH_G2M_GENES = [
+    "HMGB2", "CDK1", "NUSAP1", "UBE2C", "BIRC5", "TPX2", "TOP2A", "NDC80",
+    "CKS2", "NUF2", "CKS1B", "MKI67", "TMPO", "CENPF", "TACC3", "FAM64A",
+    "SMC4", "CCNB2", "CKAP2L", "CKAP2", "AURKB", "BUB1", "KIF11", "ANP32E",
+    "TUBB4B", "GTSE1", "KIF20B", "HJURP", "CDCA3", "HN1", "CDC20", "TTK",
+    "CDC25C", "KIF2C", "RANGAP1", "NCAPD2", "DLGAP5", "CDCA2", "CDCA8",
+    "ECT2", "KIF23", "HMMR", "AURKA", "PSRC1", "ANLN", "LBR", "CKAP5",
+    "CENPE", "CTCF", "NEK2", "G2E3", "GAS2L3", "CBX5", "CENPA",
+]
+
+
+def phase_variance_explained(M: np.ndarray, labels: np.ndarray) -> dict:
+    """One-way variance decomposition of M by group `labels` (eta²).
+
+    M : (n, d) per-cell features (latent z or gene log1p-CP10k).
+    labels : (n,) categorical phase labels.
+
+    Returns a dict with the fraction of total (intra-pert) sum-of-squares
+    explained by between-phase-group means, pooled over dims:
+        frac = sum_d between_ss_d / sum_d total_ss_d.
+    Uses population SS (ddof=0), matching how the 12.68 intra-var is computed
+    (np.var default). `mean_total_var_per_dim` lets the caller cross-check that
+    this pert's total intra-var matches the Test-4 quantity.
+    """
+    n, d = M.shape
+    mu = M.mean(axis=0)
+    total_ss_per_dim = ((M - mu) ** 2).sum(axis=0)
+    between_ss_per_dim = np.zeros(d, dtype=np.float64)
+    for g in np.unique(labels):
+        mask = labels == g
+        ng = int(mask.sum())
+        if ng == 0:
+            continue
+        mu_g = M[mask].mean(axis=0)
+        between_ss_per_dim += ng * (mu_g - mu) ** 2
+    total_ss = float(total_ss_per_dim.sum())
+    between_ss = float(between_ss_per_dim.sum())
+    return {
+        "frac": between_ss / max(total_ss, 1e-12),
+        "between_ss": between_ss,
+        "total_ss": total_ss,
+        "mean_total_var_per_dim": float(total_ss / d / max(n, 1)),
+    }
+
+
+def score_variance_explained(M: np.ndarray, cov: np.ndarray) -> dict:
+    """Multivariate R² of regressing M on continuous covariates `cov`.
+
+    M : (n, d) features. cov : (n, k) continuous covariates (S/G2M scores).
+    Fits M ≈ [1, cov] @ B by least squares and reports the pooled
+    1 - SS_res/SS_tot over dims. Threshold-free alternative to the discrete
+    phase-bin eta², immune to G1/S/G2M mis-calling.
+    """
+    n, d = M.shape
+    A = np.concatenate([np.ones((n, 1)), cov], axis=1)
+    coef, _, _, _ = np.linalg.lstsq(A, M, rcond=None)
+    pred = A @ coef
+    mu = M.mean(axis=0)
+    ss_res = float(((M - pred) ** 2).sum())
+    ss_tot = float(((M - mu) ** 2).sum())
+    return {
+        "frac": 1.0 - ss_res / max(ss_tot, 1e-12),
+        "ss_resid_reduction": ss_tot - ss_res,
+        "ss_tot": ss_tot,
+    }
+
+
 def normality_fail_rate(Z: np.ndarray, alpha: float = 0.01) -> dict:
     """Per-dim D'Agostino's K² normality test on (n_samples, d) array.
 
@@ -118,6 +197,9 @@ def main():
     ap.add_argument("--n-perts-to-test", type=int, default=10)
     ap.add_argument("--min-cells-per-pert", type=int, default=100)
     ap.add_argument("--out", default="results/v2/A1_phase_c/gaussianity_diagnostic.json")
+    ap.add_argument("--phase-max-cells", type=int, default=1000,
+                    help="max cells per pert for the S1 cell-cycle headroom test")
+    ap.add_argument("--phase-out", default="results/nbhd/S1_phase_headroom.json")
     args = ap.parse_args()
 
     device = select_device()
@@ -237,6 +319,110 @@ def main():
     print(f"  ratio (inter/intra): {ratio:.3f}  "
           f"(>>1 → strongly clustered; ≈0 → indistinguishable from one Gaussian)")
 
+    # -------- 5. Cell-cycle phase headroom (S1) --------
+    # How much of the within-pert variance (the 12.68) is just cell-cycle
+    # phase? If phase explains ~all of it, mid-k KNN neighborhoods ≈ phase bins
+    # and H1 headroom is low. Measured in BOTH latent space (consistent with
+    # how 12.68 is defined) and gene space (closer to what DES sees).
+    import anndata as ad
+    import pandas as pd
+    import scanpy as sc
+
+    print("\n=== Test 5: Cell-cycle phase headroom (S1) ===")
+    var_set = set(split.var_names)
+    s_present = [g for g in TIROSH_S_GENES if g in var_set]
+    g2m_present = [g for g in TIROSH_G2M_GENES if g in var_set]
+    print(f"  Tirosh markers matched to panel: "
+          f"S {len(s_present)}/{len(TIROSH_S_GENES)}, "
+          f"G2M {len(g2m_present)}/{len(TIROSH_G2M_GENES)}")
+
+    # Deterministic per-pert sampling for this test (independent of Test 2/4).
+    phase_rng = np.random.default_rng(123)
+    pert_idx_lists = []
+    pert_pids = []
+    for pid, _n in chosen_perts:
+        pidx = np.where(split.pert_ids == pid)[0]
+        if len(pidx) > args.phase_max_cells:
+            pidx = phase_rng.choice(pidx, size=args.phase_max_cells, replace=False)
+        pert_idx_lists.append(pidx)
+        pert_pids.append(pid)
+    all_idx = np.concatenate(pert_idx_lists)
+    offsets = np.cumsum([0] + [len(p) for p in pert_idx_lists])
+
+    # Gene-space log1p(CP10k) for all cells, scored for phase in one pass so the
+    # scanpy expression-bin reference is shared across perts.
+    x_norm_all = normalize(split.X[all_idx].toarray())
+    adata = ad.AnnData(
+        X=x_norm_all,
+        var=pd.DataFrame(index=list(split.var_names)),
+    )
+    sc.tl.score_genes_cell_cycle(
+        adata, s_genes=s_present, g2m_genes=g2m_present
+    )
+    phase_all = adata.obs["phase"].to_numpy().astype(str)
+    s_score = adata.obs["S_score"].to_numpy().astype(np.float64)
+    g2m_score = adata.obs["G2M_score"].to_numpy().astype(np.float64)
+    z_all = encode_cells(encoder, split.X, all_idx, device)
+
+    phase_counts = {str(p): int((phase_all == p).sum()) for p in np.unique(phase_all)}
+    g1_frac = phase_counts.get("G1", 0) / len(phase_all)
+    print(f"  phase distribution (all {len(phase_all)} cells): {phase_counts}")
+    if g1_frac < 0.05:
+        print(f"  ⚠  only {g1_frac*100:.2f}% of cells called G1 — discrete-phase calling")
+        print("     is likely mis-calibrated; trust the continuous S/G2M-score measure")
+        print("     below, which is immune to the G1/S/G2M thresholding.")
+
+    # Discrete (phase-bin) and continuous (S/G2M-score regression) measures.
+    # The continuous one regresses each feature dim on [1, S_score, G2M_score]
+    # and reports 1 - SS_res/SS_tot — a threshold-free upper-ish bound on how
+    # much within-pert variance the cell-cycle axis can explain.
+    per_pert_phase = []
+    num_lat = den_lat = 0.0
+    num_gene = den_gene = 0.0
+    cnum_lat = cden_lat = 0.0
+    cnum_gene = cden_gene = 0.0
+    intra_var_latent_check = []
+    for i, pid in enumerate(pert_pids):
+        sl = slice(offsets[i], offsets[i + 1])
+        labels = phase_all[sl]
+        cov = np.stack([s_score[sl], g2m_score[sl]], axis=1)
+        lat = phase_variance_explained(z_all[sl], labels)
+        gene = phase_variance_explained(x_norm_all[sl], labels)
+        clat = score_variance_explained(z_all[sl], cov)
+        cgene = score_variance_explained(x_norm_all[sl], cov)
+        num_lat += lat["between_ss"]; den_lat += lat["total_ss"]
+        num_gene += gene["between_ss"]; den_gene += gene["total_ss"]
+        cnum_lat += clat["ss_resid_reduction"]; cden_lat += clat["ss_tot"]
+        cnum_gene += cgene["ss_resid_reduction"]; cden_gene += cgene["ss_tot"]
+        intra_var_latent_check.append(lat["mean_total_var_per_dim"])
+        per_pert_phase.append({
+            "pert": split.pert_vocab[pid],
+            "n_cells": int(offsets[i + 1] - offsets[i]),
+            "phase_counts": {str(p): int((labels == p).sum()) for p in np.unique(labels)},
+            "frac_latent": lat["frac"],
+            "frac_gene": gene["frac"],
+            "frac_latent_score": clat["frac"],
+            "frac_gene_score": cgene["frac"],
+        })
+        print(f"    {split.pert_vocab[pid]:>10s} (n={offsets[i+1]-offsets[i]}): "
+              f"discrete latent={lat['frac']*100:4.1f}% gene={gene['frac']*100:4.1f}% | "
+              f"score latent={clat['frac']*100:4.1f}% gene={cgene['frac']*100:4.1f}%")
+
+    pooled_frac_latent = float(num_lat / max(den_lat, 1e-12))
+    pooled_frac_gene = float(num_gene / max(den_gene, 1e-12))
+    pooled_frac_latent_score = float(cnum_lat / max(cden_lat, 1e-12))
+    pooled_frac_gene_score = float(cnum_gene / max(cden_gene, 1e-12))
+    mean_frac_latent = float(np.mean([p["frac_latent"] for p in per_pert_phase]))
+    mean_frac_gene = float(np.mean([p["frac_gene"] for p in per_pert_phase]))
+    intra_var_latent_mean = float(np.mean(intra_var_latent_check))
+
+    print(f"  pooled DISCRETE phase-explained: "
+          f"latent={pooled_frac_latent*100:.1f}%  gene={pooled_frac_gene*100:.1f}%")
+    print(f"  pooled CONTINUOUS S/G2M-score-explained: "
+          f"latent={pooled_frac_latent_score*100:.1f}%  gene={pooled_frac_gene_score*100:.1f}%")
+    print(f"  cross-check: mean latent intra-var/dim here = {intra_var_latent_mean:.2f} "
+          f"(Test 4 reported {intra_var:.2f}; should be the same ballpark)")
+
     # -------- Interpretation --------
     print("\n=== Interpretation ===")
     if result_ctrl["fail_rate"] < 0.05:
@@ -266,6 +452,20 @@ def main():
     else:
         print(f"\n  Inter/intra ratio {ratio:.3f}: perts have some clustering structure.")
 
+    # Use the continuous score measure for the verdict (more trustworthy given
+    # the degenerate discrete phase calling); take the max of the two as a
+    # conservative upper bound on phase's share.
+    phase_share = max(pooled_frac_latent_score, pooled_frac_latent)
+    if phase_share > 0.7:
+        print(f"\n  ⚠  Cell-cycle explains ~{phase_share*100:.0f}% of within-pert latent")
+        print("     variance — neighborhoods would mostly recover phase bins.")
+        print("     H1 headroom is LOW. Proceed with low expectations (not a kill).")
+    else:
+        print(f"\n  Cell-cycle explains only ~{phase_share*100:.0f}% of within-pert latent")
+        print("     variance (continuous score measure; discrete bins agree). Substantial")
+        print("     non-phase structure remains for neighborhoods to exploit — H1 headroom")
+        print("     is plausible and is NOT dominated by cell-cycle phase.")
+
     # -------- Persist --------
     payload = {
         "checkpoint": args.phase_b_checkpoint,
@@ -282,6 +482,33 @@ def main():
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(payload, indent=2, default=float))
     print(f"\nwrote {out_path}")
+
+    # S1 headroom payload (separate file for the neighborhood experiment).
+    phase_payload = {
+        "checkpoint": args.phase_b_checkpoint,
+        "n_perts_tested": len(per_pert_phase),
+        "phase_max_cells": args.phase_max_cells,
+        "tirosh_markers_matched": {
+            "s": len(s_present), "s_total": len(TIROSH_S_GENES),
+            "g2m": len(g2m_present), "g2m_total": len(TIROSH_G2M_GENES),
+        },
+        "phase_distribution": phase_counts,
+        "g1_fraction": g1_frac,
+        "discrete_phase_calling_suspect": bool(g1_frac < 0.05),
+        "pooled_frac_phase_explained_latent": pooled_frac_latent,
+        "pooled_frac_phase_explained_gene": pooled_frac_gene,
+        "pooled_frac_score_explained_latent": pooled_frac_latent_score,
+        "pooled_frac_score_explained_gene": pooled_frac_gene_score,
+        "mean_per_pert_frac_latent": mean_frac_latent,
+        "mean_per_pert_frac_gene": mean_frac_gene,
+        "latent_intra_var_per_dim_check": intra_var_latent_mean,
+        "test4_intra_var": float(intra_var),
+        "per_pert": per_pert_phase,
+    }
+    phase_out = Path(args.phase_out)
+    phase_out.parent.mkdir(parents=True, exist_ok=True)
+    phase_out.write_text(json.dumps(phase_payload, indent=2, default=float))
+    print(f"wrote {phase_out}")
 
 
 if __name__ == "__main__":

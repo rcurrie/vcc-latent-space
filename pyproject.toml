@@ -15,6 +15,7 @@ dependencies = [
     "scanpy>=1.12",
     "h5py>=3.11",
     "tqdm>=4.66",
+    "cell-eval>=0.7.2",
 ]
 
 [project.optional-dependencies]
